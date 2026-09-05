@@ -1,0 +1,51 @@
+name: build
+
+on:
+  workflow_dispatch:      # 手动触发（Actions 页面点 Run workflow）
+  push:
+    tags: ["v*"]
+
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: |
+          pip install -r requirements.txt
+          brew install ffmpeg
+      - name: 检查内置 hdc（需已提交 vendor/bin/hdc）
+        run: |
+          test -f vendor/bin/hdc || { echo "缺少 vendor/bin/hdc：从 DevEco Command Line Tools 取 macOS 版提交入库"; exit 1; }
+      - name: Build
+        run: ./build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Wscrcpy-macOS
+          path: dist/Wscrcpy.app
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: 检查内置 hdc（需已提交 vendor/bin/hdc.exe）
+        shell: pwsh
+        run: |
+          if (-not (Test-Path vendor/bin/hdc.exe)) {
+            Write-Error "缺少 vendor/bin/hdc.exe：从 DevEco Command Line Tools for Windows 取 hdc.exe 提交入库（ffmpeg 会自动下载）"
+          }
+      - name: Build
+        shell: pwsh
+        run: ./build.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Wscrcpy-Windows
+          path: dist/Wscrcpy/
