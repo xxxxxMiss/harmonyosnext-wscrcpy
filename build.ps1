@@ -33,7 +33,12 @@ if (-not $HdcBin -or -not (Test-Path $HdcBin)) {
 if (-not $HdcBin -or -not (Test-Path $HdcBin)) {
     Write-Error "未找到 hdc.exe。请用 -HdcBin 指定，或将 hdc.exe 放到 vendor\bin\hdc.exe"
 }
-Copy-Item -Force $HdcBin vendor\bin\hdc.exe
+# 同文件不拷（-HdcBin vendor\bin\hdc.exe 时 Copy-Item 自拷会报错终止脚本）
+$hdcSrcPath = (Resolve-Path $HdcBin).Path
+$hdcDstPath = Join-Path (Resolve-Path "vendor\bin").Path "hdc.exe"
+if ($hdcSrcPath -ne $hdcDstPath) {
+    Copy-Item -Force $HdcBin $hdcDstPath
+}
 # hdc.exe 如带伴随 DLL 一并复制（Windows DLL 搜索含 exe 所在目录）
 $tcDir = (Resolve-Path (Split-Path $HdcBin -Parent)).Path
 $vendorBin = (Resolve-Path "vendor\bin").Path

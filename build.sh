@@ -27,7 +27,10 @@ if { [ -z "${HDC_SRC:-}" ] || [ ! -f "${HDC_SRC:-/nonexistent}" ]; } && [ -f ven
     HDC_SRC=vendor/bin/hdc
 fi
 [ -n "${HDC_SRC:-}" ] && [ -f "$HDC_SRC" ] || { echo "未找到 hdc（设 HDC_BIN=路径）"; exit 1; }
-cp -f "$HDC_SRC" vendor/bin/hdc
+# 同文件不拷（HDC_BIN=vendor/bin/hdc 时 cp -f x x 会报错终止 set -e 脚本）
+if [ "$(realpath "$HDC_SRC" 2>/dev/null)" != "$(realpath vendor/bin/hdc 2>/dev/null)" ]; then
+    cp -f "$HDC_SRC" vendor/bin/hdc
+fi
 
 # hdc 非单文件二进制：同目录动态库一并打包（libusb_shared 为链接依赖；
 # libexternal_hdc 会把 hdc 切到旧版 external server，刻意不打包）
