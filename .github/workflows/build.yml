@@ -5,9 +5,6 @@ on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: write         # 允许失败时回传日志分支
-
 jobs:
   macos:
     runs-on: macos-14
@@ -26,15 +23,16 @@ jobs:
       - name: Build
         env:
           HDC_BIN: vendor/bin/hdc
-        run: ./build.sh
-      - name: 失败回传日志
-        if: failure()
         run: |
-          git config user.name "ci-logbot"
-          git config user.email "ci-logbot@users.noreply.github.com"
-          git add -f build-log.txt 2>/dev/null || true
-          git commit -m "ci log macos ${{ github.run_number }} [skip ci]" || exit 0
-          git push "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" "HEAD:refs/heads/ci-logs/macos-${{ github.run_number }}" -f
+          ./build.sh 2>&1 | tee build-mac.log
+          exit ${PIPESTATUS[0]}
+      - name: 上传构建日志（无论成败，便于诊断）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-macos
+          path: build-mac.log
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         with:
           name: Wscrcpy-macOS
@@ -57,20 +55,16 @@ jobs:
           }
       - name: Build
         shell: pwsh
-        run: ./build.ps1
-      - name: 失败回传日志
-        if: failure()
-        shell: pwsh
-        env:
-          TOKEN: ${{ github.token }}
         run: |
-          git config user.name "ci-logbot"
-          git config user.email "ci-logbot@users.noreply.github.com"
-          if (Test-Path pyinstaller-log.txt) { git add -f pyinstaller-log.txt }
-          git commit -m "ci log windows ${{ github.run_number }} [skip ci]"
-          if ($LASTEXITCODE -eq 0) {
-            git push "https://x-access-token:$TOKEN@github.com/${{ github.repository }}.git" "HEAD:refs/heads/ci-logs/windows-${{ github.run_number }}" -f
-          }
+          ./build.ps1 2>&1 | Tee-Object -FilePath build-win.log
+          exit $LASTEXITCODE
+      - name: 上传构建日志（无论成败，便于诊断）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-windows
+          path: build-win.log
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         with:
           name: Wscrcpy-Windows
