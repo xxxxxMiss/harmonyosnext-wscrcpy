@@ -1,0 +1,19 @@
+# 构建产物
+build/
+dist/
+__pycache__/
+*.pyc
+.DS_Store
+
+# vendor 构建素材：ffmpeg / dylib / 其他 dll 构建时自动获取，不入库；
+# 例外：hdc（mac）+ hdc.exe/libusb_shared.dll（win）是 hdc 运行必需且无法
+# 自动下载（华为开发者站需登录），体积小，需提交入库供 CI 使用
+vendor/bin/ffmpeg
+vendor/bin/ffmpeg.exe
+vendor/bin/*.dylib
+vendor/bin/*.dll
+!vendor/bin/libusb_shared.dll
+
+# 本地验证产物
+probe_frame.jpeg
+test_rec*
