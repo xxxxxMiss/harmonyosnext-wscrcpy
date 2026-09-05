@@ -21,6 +21,8 @@ jobs:
         run: |
           test -f vendor/bin/hdc || { echo "缺少 vendor/bin/hdc：从 DevEco Command Line Tools 取 macOS 版提交入库"; exit 1; }
       - name: Build
+        env:
+          HDC_BIN: vendor/bin/hdc
         run: ./build.sh
       - uses: actions/upload-artifact@v4
         with:
