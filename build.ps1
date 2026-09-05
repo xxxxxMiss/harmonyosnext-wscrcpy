@@ -73,7 +73,12 @@ Copy-Item -Force $FfmpegBin vendor\bin\ffmpeg.exe
 Copy-Item -Force scripts\caploop.sh vendor\data\caploop.sh
 
 Write-Host "== [2/4] PyInstaller 构建 =="
-python -m PyInstaller wscrcpy.spec --noconfirm
+python -m PyInstaller wscrcpy.spec --noconfirm 2>&1 | Tee-Object -FilePath pyinstaller-log.txt
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "PyInstaller 失败，日志尾部："
+    Get-Content pyinstaller-log.txt -Tail 40
+    Write-Error "PyInstaller 构建失败（详见 pyinstaller-log.txt）"
+}
 
 Write-Host "== [3/4] 整理产物 =="
 if (Test-Path dist\Wscrcpy\Wscrcpy.exe) {
