@@ -12,11 +12,11 @@ import platform
 block_cipher = None
 
 IS_WIN = os.name == "nt"
-EXE = ".exe" if IS_WIN else ""
+EXE_SUFFIX = ".exe" if IS_WIN else ""   # 命名避开 PyInstaller 的 EXE() 全局
 
 binaries = [
-    ("vendor/bin/hdc" + EXE, "bin"),
-    ("vendor/bin/ffmpeg" + EXE, "bin"),
+    ("vendor/bin/hdc" + EXE_SUFFIX, "bin"),
+    ("vendor/bin/ffmpeg" + EXE_SUFFIX, "bin"),
 ]
 if not IS_WIN:
     # macOS：hdc 的 dylib 需落在 Frameworks 根（其 rpath 为 @executable_path/../），
