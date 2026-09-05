@@ -32,13 +32,15 @@ cp -f "$HDC_SRC" vendor/bin/hdc
 # hdc 非单文件二进制：同目录动态库一并打包（libusb_shared 为链接依赖；
 # libexternal_hdc 会把 hdc 切到旧版 external server，刻意不打包）
 TC_DIR=$(dirname "$HDC_SRC")
+shopt -s nullglob
 for dy in "$TC_DIR"/*.dylib; do
     case "$(basename "$dy")" in
         libexternal_hdc.dylib) echo "跳过 $dy（避免旧版 external server 劫持 5037）"; continue ;;
     esac
-    [ -f "$dy" ] && cp -f "$dy" vendor/bin/
+    cp -f "$dy" vendor/bin/
 done
-[ -n "$(ls vendor/bin/*.dylib 2>/dev/null)" ] || echo "警告: hdc 目录未发现 .dylib，若目标机报 Library not loaded 需手动补"
+shopt -u nullglob
+ls vendor/bin/*.dylib >/dev/null 2>&1 || echo "提示: 未发现 .dylib（无旧版外部模式依赖，通常正是期望行为）"
 
 FFMPEG_SRC="${FFMPEG_BIN:-$(command -v ffmpeg || echo /opt/homebrew/bin/ffmpeg)}"
 [ -f "$FFMPEG_SRC" ] || { echo "未找到 ffmpeg（设 FFMPEG_BIN=路径，或 brew install ffmpeg）"; exit 1; }
@@ -51,7 +53,9 @@ echo "hdc:    $(file -b vendor/bin/hdc | cut -d, -f1,2)"
 echo "ffmpeg: $(file -b vendor/bin/ffmpeg | cut -d, -f1,2)"
 
 echo "== [2/3] PyInstaller 构建 =="
-"$PY" -m PyInstaller wscrcpy.spec --noconfirm
+if ! "$PY" -m PyInstaller wscrcpy.spec --noconfirm 2>&1 | tee build-log.txt; then
+    echo "PyInstaller 失败，日志尾部："; tail -40 build-log.txt; exit 1
+fi
 
 echo "== [3/3] ad-hoc 签名 =="
 codesign --force --deep --sign - dist/Wscrcpy.app 2>/dev/null || echo "(跳过签名)"

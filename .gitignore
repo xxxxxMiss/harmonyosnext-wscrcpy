@@ -17,3 +17,5 @@ vendor/bin/*.dll
 # 本地验证产物
 probe_frame.jpeg
 test_rec*
+build-log.txt
+pyinstaller-log.txt
