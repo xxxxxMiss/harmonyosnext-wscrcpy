@@ -5,6 +5,11 @@ on:
   push:
     tags: ["v*"]
 
+# 需要在仓库 Settings → Secrets and variables → Actions 配置的密钥：
+#   CI_PAT: 经典 PAT（勾选 repo 权限）。用于构建失败时把完整日志推回
+#           ci-logs/* 分支。未配置时退化为内置 GITHUB_TOKEN（部分场景会被拒）。
+# 构建本身不需要任何密钥：hdc 随仓库提交，ffmpeg 由构建脚本自动下载。
+
 jobs:
   macos:
     runs-on: macos-14
@@ -26,13 +31,33 @@ jobs:
         run: |
           ./build.sh 2>&1 | tee build-mac.log
           exit ${PIPESTATUS[0]}
-      - name: 上传构建日志（无论成败，便于诊断）
+      - name: 上传构建日志
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-logs-macos
-          path: build-mac.log
+          path: |
+            build-mac.log
+            build-log.txt
           if-no-files-found: ignore
+      - name: 失败回传日志到 ci-logs 分支
+        if: failure()
+        env:
+          CI_PAT: ${{ secrets.CI_PAT }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUNID: ${{ github.run_number }}
+        run: |
+          git config user.name "ci-logbot"
+          git config user.email "ci-logbot@users.noreply.github.com"
+          git add -f build-mac.log build-log.txt 2>/dev/null || true
+          git commit -m "ci log macos ${RUNID} [skip ci]" || exit 0
+          if [ -n "$CI_PAT" ]; then
+            git push "https://xxxxxMiss:${CI_PAT}@github.com/${REPO}.git" "HEAD:refs/heads/ci-logs/macos-${RUNID}" -f
+          else
+            echo "[i] 未配置 CI_PAT，跳过日志回传（可在 Actions 日志页直接查看）"
+            git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:refs/heads/ci-logs/macos-${RUNID}" -f
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: Wscrcpy-macOS
@@ -58,13 +83,36 @@ jobs:
         run: |
           ./build.ps1 2>&1 | Tee-Object -FilePath build-win.log
           exit $LASTEXITCODE
-      - name: 上传构建日志（无论成败，便于诊断）
+      - name: 上传构建日志
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-logs-windows
-          path: build-win.log
+          path: |
+            build-win.log
+            pyinstaller-log.txt
           if-no-files-found: ignore
+      - name: 失败回传日志到 ci-logs 分支
+        if: failure()
+        shell: pwsh
+        env:
+          CI_PAT: ${{ secrets.CI_PAT }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUNID: ${{ github.run_number }}
+        run: |
+          git config user.name "ci-logbot"
+          git config user.email "ci-logbot@users.noreply.github.com"
+          git add -f build-win.log pyinstaller-log.txt 2>/dev/null | Out-Null
+          git commit -m "ci log windows ${RUNID} [skip ci]"
+          if ($LASTEXITCODE -eq 0) {
+            if ($env:CI_PAT) { $user = "xxxxxMiss"; $tok = $env:CI_PAT }
+            else { $user = "x-access-token"; $tok = $GH_TOKEN }
+            git push "https://${user}:${tok}@github.com/${REPO}.git" "HEAD:refs/heads/ci-logs/windows-${RUNID}" -f
+          } else {
+            Write-Host "无新增日志可提交"
+            exit 0
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: Wscrcpy-Windows
