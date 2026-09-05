@@ -22,6 +22,10 @@ if [ -z "$HDC_SRC" ]; then
         | awk -F'/hmscore/' '{split($2,a,"/"); print a[1]+0, $0}' | sort -n | awk '{print $2}' | tail -1)
 fi
 [ -n "$HDC_SRC" ] && [ -f "$HDC_SRC" ] || HDC_SRC="$(command -v hdc || true)"
+# CI / 绿色构建兜底：直接用随仓库提交的 hdc
+if { [ -z "${HDC_SRC:-}" ] || [ ! -f "${HDC_SRC:-/nonexistent}" ]; } && [ -f vendor/bin/hdc ]; then
+    HDC_SRC=vendor/bin/hdc
+fi
 [ -n "${HDC_SRC:-}" ] && [ -f "$HDC_SRC" ] || { echo "未找到 hdc（设 HDC_BIN=路径）"; exit 1; }
 cp -f "$HDC_SRC" vendor/bin/hdc
 

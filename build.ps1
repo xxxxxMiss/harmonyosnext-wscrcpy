@@ -42,16 +42,31 @@ if ($tcDir -ne $vendorBin) {
         ForEach-Object { Copy-Item -Force $_.FullName vendor\bin\ }
 }
 
-# --- ffmpeg.exe（静态构建，无 DLL 依赖） ---
+# --- ffmpeg.exe（静态 GPL 构建，含 libx264；无 DLL 依赖） ---
 if (-not $FfmpegBin -or -not (Test-Path $FfmpegBin)) {
-    $zip = "$env:TEMP\ffmpeg-essentials.zip"
-    Write-Host "下载静态 ffmpeg（gyan.dev essentials）..."
-    Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" `
-        -OutFile $zip -UserAgent "Mozilla/5.0"
-    Expand-Archive -Force -Path $zip -DestinationPath "$env:TEMP\ffmpeg-ext"
-    $hit = Get-ChildItem "$env:TEMP\ffmpeg-ext" -Recurse -Filter ffmpeg.exe | Select-Object -First 1
-    if (-not $hit) { Write-Error "下载包中未找到 ffmpeg.exe" }
-    $FfmpegBin = $hit.FullName
+    # 主源 BtbN GitHub Releases（云机访问稳定）；备源 gyan.dev
+    $sources = @(
+        @{ Url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" },
+        @{ Url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" }
+    )
+    foreach ($s in $sources) {
+        try {
+            $zip = "$env:TEMP\ffmpeg-static.zip"
+            $ext = "$env:TEMP\ffmpeg-static-ext"
+            Write-Host "下载 ffmpeg: $($s.Url)"
+            Invoke-WebRequest -Uri $s.Url -OutFile $zip -UserAgent "Mozilla/5.0" -TimeoutSec 900
+            Expand-Archive -Force -Path $zip -DestinationPath $ext
+            $hit = Get-ChildItem $ext -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+            if (-not $hit) { throw "包内未找到 ffmpeg.exe" }
+            $FfmpegBin = $hit.FullName
+            break
+        } catch {
+            Write-Host "源失败: $($_.Exception.Message) —— 尝试下一个"
+        }
+    }
+}
+if (-not $FfmpegBin -or -not (Test-Path $FfmpegBin)) {
+    Write-Error "ffmpeg.exe 获取失败。请手动下载后 -FfmpegBin 指定"
 }
 Copy-Item -Force $FfmpegBin vendor\bin\ffmpeg.exe
 
