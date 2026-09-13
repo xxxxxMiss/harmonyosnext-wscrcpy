@@ -63,4 +63,11 @@ fi
 echo "== [3/3] ad-hoc 签名 =="
 codesign --force --deep --sign - dist/Wscrcpy.app 2>/dev/null || echo "(跳过签名)"
 
-echo "完成: dist/Wscrcpy.app （双击运行，或 open dist/Wscrcpy.app）"
+echo "== [4/4] DMG 安装包 =="
+rm -rf /tmp/dmg-staging Wscrcpy-macOS.dmg
+mkdir -p /tmp/dmg-staging
+cp -R dist/Wscrcpy.app /tmp/dmg-staging/
+ln -s /Applications /tmp/dmg-staging/Applications   # 拖拽安装
+hdiutil create -volname "Wscrcpy" -srcfolder /tmp/dmg-staging -ov -format UDZO \
+    Wscrcpy-macOS.dmg >/dev/null
+echo "完成: dist/Wscrcpy.app + Wscrcpy-macOS.dmg （双击 DMG 拖入 Applications 安装）"
