@@ -273,5 +273,56 @@ CI_PAT 仅用于构建失败时把日志推回 `ci-logs/*` 分支供远程诊断
 | tkinter 对话框线程规则 | 文件对话框只在按钮回调（UI 线程）里调，采集线程只发事件 |
 | Windows 无法本机自动化验证 | CI 构建 + 冒烟清单人工过一遍；mac 侧自动化照旧 |
 
-### 9.5 不做的事（本期）
-- 触控回注（原 M3）、音频、自动更新、菜单栏常驻、Linux 包（需求出现再加，PyInstaller 本身支持）。
+## 9.5 路线2-B 调研：官方流畅投屏/录屏的真实现（2026-09-06 完成）✅
+
+> 背景：连续截图在动画场景基本不可用（1-2fps），而 DevEco Testing 投屏/录屏流畅。
+> 通过解剖本机 `DevEco_Testing_for_App.app`（明文 Python 客户端 + so 资源）完整还原了官方实现。
+
+### 官方实现全链路（已 100% 还原）
+
+1. **素材在 PC 侧**：`devicetest/res/recorder/libscrcpy_server1~4.z.so`（ARM64 ELF，4 份对应
+   不同系统版本；华为内部就叫 scrcpy server，思路同 Android scrcpy 的 app_process）
+2. **推送**：`hdc file send` → 设备 `/data/local/tmp/libscreen_recorder.z.so`（带 md5 增量更新）
+3. **启动（关键魔法）**：`/system/bin/uitest start-daemon singleness --extension-name
+   libscreen_recorder.z.so -p 5001 -m 1 -screenId 0`——**uitest 是系统签名二进制，
+   dlopen 该 so 并以系统权限运行**，so 导出 `UiTestExtension_OnInit/OnRun` 插件入口 +
+   `OHOS::DelayedSingleton<RpcServer>`。这就是绕过"屏幕采集需系统权限"的正门
+   （普通应用无法使用，但 uitest 扩展机制可以）。
+4. **传输**：设备端 gRPC 服务（TCP 5001 或 abstract unix socket `screen_record_grpc_socket`），
+   PC 侧 `hdc fport tcp:<local> tcp:5001` 转发后 gRPC 连接
+   （grpc_max_receive_message_length=10MB）。
+5. **协议（proto 已完整拿到）**：
+   ```
+   service ScrcpyService {
+     rpc onStart(Empty) returns (stream ReplyMessage);   // 启动并持续收视频流
+     rpc onEnd(Empty) returns (ReplyEndMessage);          // 停止，result=帧数
+     rpc onRequestIDRFrame(Empty) returns (...);          // 按需请求关键帧（实时投屏铁证）
+   }
+   ReplyMessage { string data; int32 reply_type; ParamValue payload; }
+   ```
+6. **产物/渲染**：录屏模式设备端并行写 `/data/local/tmp/mytest.mp4`（stop 后 pull）；
+   实时投屏 = 持续消费 `onStart` 流（data 内 H.264 帧）+ 按需 IDR。
+   帧数 < MIN_FRAME_COUNT 时客户端回退截图。
+7. **门槛**：设备 uitest ≥ 4.1.4.6（本机手机实测 6.0.2.3 ✓，系统 OpenHarmony-6.1.1.120）。
+
+### 为什么流畅（与路线2 的本质区别）
+
+设备端**系统级采集（RenderService 层）+ 硬件编码 H.264**，传输的是压缩视频流，
+30-60fps、只传变化；而 snapshot_display 单帧截图 ~0.6s/帧、全量 JPEG，差 1-2 个数量级。
+（旁证：官方论坛有帖子反馈 DevEco Testing 投屏会持续触发 `on('screenshot')` 监听。）
+
+### 复用评估
+
+- **技术上全部可复现**：so（本机 4 份）+ proto（scrcpy_pb2 可直接用）+ 客户端逻辑
+  （record_agent.py/rpc_manager.py 可照抄）。实现路径：新增 `scrcpy_server.py`，
+  在现有 GUI 里加"流畅模式"，投屏消费 gRPC 流，录制直接用设备端 mp4（免 PC 合成）。
+- **合规红线**：so 是华为版权二进制——**不能打包进我们的发布物**。可行做法：
+  运行时从本机 DevEco Testing 安装目录自动定位（`/Applications/DevEco_Testing_for_App.app`），
+  未安装则提示用户装（类比 scrcpy 依赖 adb 的关系）。
+- 版本匹配：4 份 so 与系统的映射逻辑在 `check_uitest_version`/`_compare_software_version`，
+  实施时先真机试 server4（最新最小 264KB），不行再降级。
+
+### 与现有工具的关系
+
+M1-M4 的截图管线保留为兜底（无 DevEco Testing / 手表等 so 不可用场景）；
+流畅模式作为 M5 主升级：投屏帧率 1-2fps → 视频级，录屏免 ffmpeg 合成。
