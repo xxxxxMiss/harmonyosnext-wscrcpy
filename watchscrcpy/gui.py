@@ -16,8 +16,8 @@ from typing import Optional
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut
-from PySide6.QtWidgets import (QFileDialog, QFrame, QHBoxLayout, QLabel, QPushButton,
-                               QSizePolicy, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel,
+                               QPushButton, QSizePolicy, QVBoxLayout, QWidget)
 
 from . import resources
 from .capture import BaseCapture, Frame, LoopCapture, PulledCapture
@@ -497,14 +497,18 @@ class MirrorWindow(QWidget):
 
     def save_screenshot(self):
         if not self.hdc or self._last_image is None:
-            self._on_status("未连接设备或尚无画面，无法截取", err=True)
+            self.status.setText("✗ 未连接设备或尚无画面，无法截取")
             return
+        # 无条件复制到系统剪贴板，与是否保存文件无关
+        QApplication.clipboard().setImage(self._last_image)
         path = self._ask_path("截屏保存为", "PNG 图片 (*.png)", "png")
-        if not path:
-            return
-        self._last_image.save(path)
-        self.status.setText(f"已保存 {path}")
-        logging.info("shot: %s", path)
+        if path:
+            self._last_image.save(path)
+            self.status.setText(f"已保存 {path}（并已复制到剪贴板）")
+            logging.info("shot: %s (copied to clipboard)", path)
+        else:
+            self.status.setText("截图已复制到剪贴板")
+            logging.info("shot: clipboard only")
 
     # ---------- 关闭 ----------
     def closeEvent(self, ev):
