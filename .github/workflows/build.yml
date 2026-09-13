@@ -64,7 +64,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: Wscrcpy-macOS
-          path: dist/Wscrcpy.app
+          path: |
+            dist/Wscrcpy.app
+            Wscrcpy-macOS.dmg
 
   windows:
     runs-on: windows-latest

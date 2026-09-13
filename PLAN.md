@@ -243,9 +243,21 @@ PyInstaller 不跨平台交叉编译：**mac 包在 mac 上构建，win 包在 W
   `--probe` 6/6；GUI 双击启动 + `--record` 自动录制 17s/27 帧；AppleScript 优雅退出
   → closeEvent 触发后台合成 → mp4（1216x2688, ffprobe 验证）→ 进程干净退出。
 
-**Step 2b — Windows 打包 📦 脚本就绪（未实测）**
-- `build.ps1`（hdc.exe 定位/伴随 DLL 复制、gyan.dev 静态 ffmpeg 下载）+ CI workflow。
-- 真实 Windows 构建与连机冒烟需 Windows 机器。
+**Step 2b — Windows 打包 ✅ 完成（GitHub Actions 云构建出包，2026-09-06）**
+- `build.ps1`（hdc.exe 定位/伴随 DLL 复制、BtbN 主源 + gyan 备源自动下载静态 ffmpeg）
+  + CI workflow（windows-latest）**已实测出包**：`Wscrcpy-Windows` artifact 112.9MB；
+- 排障历程（私有仓库日志不可读，靠 artifact/分支回传 + 本地 pwsh 验证迭代）：
+  1. **根因**：spec 里 `EXE = ".exe"` 变量遮蔽 PyInstaller 的 `EXE()` 全局 → 双平台
+     spec 解析即崩（v0.1.0-v0.1.2 全挂）→ 改名 EXE_SUFFIX；
+  2. build.sh `set -e` 下 dylib 空匹配循环中断 → nullglob；
+  3. `HDC_BIN=vendor/bin/hdc` 时 `cp -f` 自拷报错 → realpath 同文件守卫（sh/ps1 双侧）；
+  4. CI_PAT 密钥（可选，见下）用于失败日志回传 `ci-logs/*` 分支；
+- 待用户在 Windows 真机冒烟（README 清单）。
+
+**密钥配置（可选）**：仓库 Secrets → Actions → `CI_PAT`（经典 PAT，勾选 repo）。
+构建本身**零密钥**（hdc 入库、ffmpeg 自动下载、GITHUB_TOKEN 内置）；
+CI_PAT 仅用于构建失败时把日志推回 `ci-logs/*` 分支供远程诊断（未配置时仅能
+在 Actions 页面看日志/artifact）。
 
 **Step 3 — 打磨（未开始）**
 - 图标、Dock/任务栏名称、签名、记住上次输出目录。

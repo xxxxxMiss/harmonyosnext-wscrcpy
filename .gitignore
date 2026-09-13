@@ -1,6 +1,7 @@
 # 构建产物
 build/
 dist/
+Wscrcpy-macOS.dmg
 __pycache__/
 *.pyc
 .DS_Store
