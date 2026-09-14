@@ -5,10 +5,9 @@ on:
   push:
     tags: ["v*"]
 
-# 需要在仓库 Settings → Secrets and variables → Actions 配置的密钥：
-#   CI_PAT: 经典 PAT（勾选 repo 权限）。用于构建失败时把完整日志推回
-#           ci-logs/* 分支。未配置时退化为内置 GITHUB_TOKEN（部分场景会被拒）。
-# 构建本身不需要任何密钥：hdc 随仓库提交，ffmpeg 由构建脚本自动下载。
+# 产物：
+#   每次 build → Artifacts（含目录版 + 构建日志）
+#   push tag  → GitHub Release 直接挂可执行文件：Wscrcpy-macOS.dmg / Wscrcpy-Windows.exe
 
 jobs:
   macos:
@@ -36,31 +35,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-logs-macos
-          path: |
-            build-mac.log
-            build-log.txt
+          path: build-mac.log
           if-no-files-found: ignore
-      - name: 失败回传日志到 ci-logs 分支
-        if: failure()
-        env:
-          CI_PAT: ${{ secrets.CI_PAT }}
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          RUNID: ${{ github.run_number }}
-        run: |
-          git config user.name "ci-logbot"
-          git config user.email "ci-logbot@users.noreply.github.com"
-          # 拆分 add：git add 任一 pathspec 不存在会整体失败
-          for f in build-mac.log build-log.txt; do
-            [ -f "$f" ] && git add -f "$f"
-          done
-          git commit -m "ci log macos ${RUNID} [skip ci]" || exit 0
-          if [ -n "$CI_PAT" ]; then
-            git push "https://xxxxxMiss:${CI_PAT}@github.com/${REPO}.git" "HEAD:refs/heads/ci-logs/macos-${RUNID}" -f
-          else
-            echo "[i] 未配置 CI_PAT，跳过日志回传（可在 Actions 日志页直接查看）"
-            git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:refs/heads/ci-logs/macos-${RUNID}" -f
-          fi
       - uses: actions/upload-artifact@v4
         with:
           name: Wscrcpy-macOS
@@ -93,34 +69,39 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-logs-windows
-          path: |
-            build-win.log
-            pyinstaller-log.txt
+          path: build-win.log
           if-no-files-found: ignore
-      - name: 失败回传日志到 ci-logs 分支
-        if: failure()
-        shell: pwsh
-        env:
-          CI_PAT: ${{ secrets.CI_PAT }}
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          RUNID: ${{ github.run_number }}
-        run: |
-          git config user.name "ci-logbot"
-          git config user.email "ci-logbot@users.noreply.github.com"
-          foreach ($f in @("build-win.log", "pyinstaller-log.txt")) {
-            if (Test-Path $f) { git add -f $f }
-          }
-          git commit -m "ci log windows ${RUNID} [skip ci]"
-          if ($LASTEXITCODE -eq 0) {
-            if ($env:CI_PAT) { $user = "xxxxxMiss"; $tok = $env:CI_PAT }
-            else { $user = "x-access-token"; $tok = $GH_TOKEN }
-            git push "https://${user}:${tok}@github.com/${REPO}.git" "HEAD:refs/heads/ci-logs/windows-${RUNID}" -f
-          } else {
-            Write-Host "无新增日志可提交"
-            exit 0
-          }
       - uses: actions/upload-artifact@v4
         with:
           name: Wscrcpy-Windows
-          path: dist/Wscrcpy/
+          path: dist/Wscrcpy.exe
+
+  # Release：tag 推送时创建，直接挂 dmg / exe 可执行文件
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Wscrcpy-macOS
+          path: rel
+      - uses: actions/download-artifact@v4
+        with:
+          name: Wscrcpy-Windows
+          path: rel
+      - name: 整理发布文件
+        run: |
+          mkdir -p out
+          mv rel/Wscrcpy-macOS.dmg out/ 2>/dev/null || true
+          mv rel/Wscrcpy.exe out/ 2>/dev/null || true
+          ls -lh out/
+          test -f out/Wscrcpy-macOS.dmg && test -f out/Wscrcpy.exe
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            out/Wscrcpy-macOS.dmg
+            out/Wscrcpy.exe
+          generate_release_notes: true
