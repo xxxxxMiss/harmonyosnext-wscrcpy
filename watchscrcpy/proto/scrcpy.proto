@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+// 设备端 scrcpy server 扩展的 gRPC 接口。
+// 依据 DevEco Testing scrcpy_pb2 descriptor + HoKit v1.8.7 客户端 proto 文本
+// 双源交叉校准（package 为空；onEnd 返回 Empty、onRequestIDRFrame 返回
+// ReplyEndMessage 以 HoKit 实测版为准——两者与 DevEco 版方向相反）。
+
+message ReplyMessage {
+  string data = 1;          // 视频帧数据（二进制 H.264，协议用 string 承载 bytes）
+  int32 reply_type = 2;     // 帧类型标记
+  map<string, ParamValue> payload = 3;
+}
+
+message ParamValue {
+  oneof values {
+    int64 val_int = 1;
+    double val_double = 2;
+    string val_string = 3;
+    bool val_bool = 4;
+    bytes val_bytes = 5;
+    float val_float = 6;
+  }
+}
+
+message ReplyEndMessage {
+  int32 result = 1;         // 帧数
+}
+
+message Empty {
+}
+
+service ScrcpyService {
+  rpc onStart(Empty) returns (stream ReplyMessage);
+  rpc onEnd(Empty) returns (Empty);
+  rpc onRequestIDRFrame(Empty) returns (ReplyEndMessage);
+}

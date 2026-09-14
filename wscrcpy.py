@@ -29,8 +29,9 @@ def parse_args() -> argparse.Namespace:
                    help="圆形遮罩（圆屏手表）；auto=穿戴设备自动开")
     p.add_argument("--record", metavar="OUT.mp4", help="GUI 打开后立即开始录制到此路径")
     p.add_argument("--shot", metavar="OUT.jpeg", help="单帧截图后退出（CLI）")
-    p.add_argument("--mode", choices=["pull", "loop"], default="pull",
-                   help="pull=PC 逐帧驱动（默认）；loop=手表端 caploop（实验性）")
+    p.add_argument("--mode", choices=["stream", "pull", "loop"], default="stream",
+                   help="stream=H.264 视频流 30fps+（默认，不可用自动回落）；"
+                        "pull=PC 逐帧截图；loop=设备端连拍（并入 pull）")
     p.add_argument("--no-wakeup", action="store_true", help="启动时不尝试唤醒亮屏")
     p.add_argument("--probe", action="store_true", help="运行真机验证清单（CLI）")
     return p.parse_args()
