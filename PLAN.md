@@ -326,3 +326,30 @@ CI_PAT 仅用于构建失败时把日志推回 `ci-logs/*` 分支供远程诊断
 
 M1-M4 的截图管线保留为兜底（无 DevEco Testing / 手表等 so 不可用场景）；
 流畅模式作为 M5 主升级：投屏帧率 1-2fps → 视频级，录屏免 ffmpeg 合成。
+
+## 10. 里程碑 M5：流畅模式（H.264 视频流）✅ 完成 2026-09-14
+
+> 调研见 §9.5。实测打通：HarmonyOS 6.1.1 / uitest 6.0.2.3 / screencopy_v2_1.3.so。
+
+### 实现全链路（全部真机验证）
+- **so 来源**：HoKit v1.8.7 发行包内加密 so（AES-256-CBC，key 内嵌其 JS，已提取）；
+  解密后 `vendor/so/` 以加密形态入库（合规：不明文分发），运行时解密到 ~/.cache。
+  `watchscrcpy/scrcpy_server.py` 另支持从本机 HoKit 安装自动提取。
+- **设备端**：推 so → `uitest start-daemon singleness --extension-name scrcpy_server.so
+  -scale 2 -frameRate 30 -bitRate 10M -p 5001 -screenId 0 -encodeType 0
+  -iFrameInterval 2000 -repeatInterval 33`（参数照抄 HoKit 实测）→ abstract socket
+  `scrcpy_grpc_socket` → `hdc fport` 转发（端口自适应，hdc server 会积累残留）。
+- **协议修正**（较 DevEco 版）：视频帧在 `payload["data"].val_bytes`；flags: 8=SPS/PPS
+  2=IDR 0=P；onEnd 返回 Empty、onRequestIDRFrame 返回 ReplyEndMessage。
+- **实测约束**：① onStart 一个 daemon 只能消费一次（中断不得重连，须重启 daemon）；
+  ② daemon singleness 单例（启动前 pkill）；③ so 版本须匹配系统（v2_1.4 因系统
+  libprotobuf 缺符号不可用于 6.1.1，v2_1.3 验证可用）；④ 屏幕静止只推变化帧
+  （IDR 间隔 2s），动画场景 36-37fps 实测。
+- **PC 端**：`stream.py` H264Decoder（PyAV 软解+丢旧帧策略）与 StreamRecorder
+  （裸流直写零 CPU + 停止时 ffmpeg -c copy 秒级封装，录制预填 SPS/PPS+IDR 保证
+  裸流独立可解码，-r 30 修正时长）。
+- **GUI**：mode=stream 默认；失败（无 so/版本不配/端口问题）自动回落 pull 截图模式
+  并提示；掉线/流中断回未连接态；录制/截屏/剪贴板全功能在流模式下复用。
+- **验证**：模块层 224 帧/6s=37fps、H.264 Annex-B 起始码+SPS 验证；GUI 离屏
+  36fps 渲染、录制 mp4（ffprobe h264 608x1344）、截屏、回落路径（fport 残留时
+  自动降级）实测；冻结态（DMG 包）stream 录制闭环实测。

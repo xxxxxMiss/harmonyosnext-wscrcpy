@@ -23,6 +23,8 @@ from . import resources
 from .capture import BaseCapture, Frame, LoopCapture, PulledCapture
 from .hdc import HOST_TEMP, TMP_DIR, Hdc, HdcError
 from .recorder import Recorder
+from .scrcpy_server import H264Stream, find_local_so
+from .stream import H264Decoder, StreamRecorder
 
 BG = "#0A0E1A"
 PANEL = "#101624"
@@ -216,6 +218,11 @@ class MirrorWindow(QWidget):
         self.hdc: Optional[Hdc] = None
         self._last_hdc: Optional[Hdc] = None     # 供退出清理使用
         self.cap: Optional[BaseCapture] = None
+        self.stream: Optional[H264Stream] = None
+        self.decoder: Optional[H264Decoder] = None
+        self.stream_rec: Optional[StreamRecorder] = None
+        self.mode = mode if mode != "loop" else "pull"   # loop(设备端截图连拍)并入 pull
+        self.effective_mode = self.mode            # stream 失败时回落为 pull
         self.recorder: Optional[Recorder] = None
         self.rec_t0: Optional[float] = None
         self._last_image: Optional[QImage] = None
@@ -371,6 +378,16 @@ class MirrorWindow(QWidget):
             self.toggle_record()
 
     def _enter_disconnected(self, msg: str):
+        if self.stream_rec and self.stream_rec.recording:
+            kind, text = self.stream_rec.stop()    # 掉线先保住已录流
+            if kind == "done":
+                self._on_status(f"掉线前录制已保存 {text}", err=False)
+        if self.decoder:
+            self.decoder.stop()
+            self.decoder = None
+        if self.stream:
+            self.stream.stop()
+            self.stream = None
         if self.recorder and self.recorder.recording:
             self._stop_record()                    # 掉线先保住已录帧
         if self.cap:
@@ -384,13 +401,53 @@ class MirrorWindow(QWidget):
         self._on_status(msg, err=True)
 
     def _start_capture(self):
+        """按模式起采集：stream（H.264 流，37fps）优先，失败自动回落 pull（截图 1-2fps）。"""
+        if self.effective_mode == "stream":
+            try:
+                self._start_stream()
+                return
+            except Exception as e:          # 含 HdcError / grpc / av 异常
+                logging.warning("stream 模式启动失败，回落 pull: %s", e)
+                self._on_status(f"流畅模式不可用（{str(e)[:60]}），已回落截图模式", err=True)
+                self.effective_mode = "pull"
         cls = LoopCapture if self.mode == "loop" else PulledCapture
         self.cap = cls(self.hdc, self.interval, self._worker_frame,
                        on_status=lambda m: self.bridge.status_changed.emit(m, True),
                        on_lost=self.bridge.lost.emit)
         self.cap.start()
 
+    def _start_stream(self):
+        def on_stream_status(msg: str):
+            self.bridge.status_changed.emit(msg, True)
+            if "中断" in msg:
+                self.bridge.lost.emit()       # 流断开视同掉线，回未连接态
+        self.stream = H264Stream(self.hdc, on_frame=self._on_stream_frame,
+                                 on_status=on_stream_status)
+        self.decoder = H264Decoder(
+            on_image=lambda img: self.bridge.frame_arrived.emit((img, False, None)))
+        self.decoder.start()
+        self.stream.start(timeout=15)
+        logging.info("stream 模式启动: so=%s", self.stream.so_path)
+
+    def _on_stream_frame(self, flags: int, data: bytes, pts: int):
+        """流回调（grpc 线程）：喂解码器 + 喂流录制器。"""
+        if self.decoder:
+            self.decoder.feed(flags, data)
+        rec = self.stream_rec
+        if rec and rec.recording:
+            rec.write(flags, data, pts)
+
     def stop(self):
+        if self.decoder:
+            self.decoder.stop()
+            self.decoder = None
+        if self.stream:
+            self.stream.stop()
+            self.stream = None
+        if self.stream_rec and self.stream_rec.recording:
+            kind, text = self.stream_rec.stop()
+            if kind == "saved_frames":
+                self._on_status(text, err=True)
         if self.cap:
             self.cap.stop()
             self.cap.join(timeout=3)
@@ -449,7 +506,9 @@ class MirrorWindow(QWidget):
         if not self.hdc:
             self._on_status("未连接设备，无法录制", err=True)
             return
-        if self.recorder and self.recorder.recording:
+        if self.stream_rec and self.stream_rec.recording:
+            self._stop_record()
+        elif self.recorder and self.recorder.recording:
             self._stop_record()
         else:
             self._start_record()
@@ -467,6 +526,23 @@ class MirrorWindow(QWidget):
         path = self._ask_path("录制保存为", "MP4 视频 (*.mp4)", "mp4")
         if not path:
             return
+        if self.effective_mode == "stream":
+            self.stream_rec = StreamRecorder(path)
+            pre = []
+            if self.stream:
+                if self.stream.last_config:
+                    pre.append(self.stream.last_config)
+                if self.stream.last_idr:
+                    pre.append(self.stream.last_idr)
+            self.stream_rec.start(prefill=pre)
+            self.rec_t0 = time.monotonic()
+            self.btn_rec.setProperty("rec", True)
+            self.btn_rec.setText("■ 停止 00:00")
+            _repolish(self.btn_rec)
+            self.rec_timer.start(500)
+            self.status.setText(f"录制中（视频流直录）→ {path}")
+            logging.info("stream record start: %s", path)
+            return
         self.recorder = Recorder(path, scale=1,
                                  on_compose_done=lambda ok, p: self.bridge.status_changed.emit(
                                      f"已保存 {p}" if ok else f"合成失败（帧已保留）：{p}", not ok))
@@ -480,6 +556,19 @@ class MirrorWindow(QWidget):
         logging.info("record start: %s", path)
 
     def _stop_record(self):
+        if self.stream_rec and self.stream_rec.recording:
+            self.rec_t0 = None
+            self.rec_timer.stop()
+            kind, text = self.stream_rec.stop()
+            self.btn_rec.setProperty("rec", False)
+            self.btn_rec.setText("● 录制")
+            _repolish(self.btn_rec)
+            if kind == "done":
+                self.status.setText(f"已保存 {text}（{getattr(self.stream_rec, 'frames', 0)} 帧，无重编码）")
+            else:
+                self._on_status(text, kind == "empty")
+            logging.info("stream record stop: %s %s", kind, text)
+            return
         rec = self.recorder
         if not rec:
             return

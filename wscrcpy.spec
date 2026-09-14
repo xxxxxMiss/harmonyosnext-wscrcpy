@@ -30,7 +30,8 @@ else:
     binaries += [(d, "bin") for d in glob.glob("vendor/bin/*.dll")]
 
 datas = [
-    ("vendor/data/caploop.sh", "data"),
+    ('vendor/data/caploop.sh', 'data'),
+    ('vendor/so', 'vendor/so'),          # 加密形态的 scrcpy server（运行时解密）
 ]
 
 a = Analysis(
@@ -38,7 +39,8 @@ a = Analysis(
     pathex=[],
     binaries=binaries,
     datas=datas,
-    hiddenimports=[],
+    hiddenimports=['appdirs', 'watchscrcpy.proto', 'watchscrcpy.proto.scrcpy_pb2',
+                   'watchscrcpy.proto.scrcpy_pb2_grpc'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
