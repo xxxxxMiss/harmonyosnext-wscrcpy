@@ -1,8 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec：macOS 出 Wscrcpy.app，Windows 出 dist/Wscrcpy/Wscrcpy.exe。
+"""PyInstaller spec：macOS 出 Wscrcpy.app + DMG；Windows 出单文件 Wscrcpy.exe。
 
 vendor/bin/{hdc,ffmpeg}[.exe] 与 vendor/data/caploop.sh 由 build.sh / build.ps1 备齐；
-ffmpeg 的动态库依赖由 PyInstaller 二进制依赖分析自动收集。
+vendor/so 为加密形态的 scrcpy server so（运行时解密，不明文分发）。
 PyInstaller 不支持交叉编译：mac 包在 mac 构建，Windows 包在 Windows/CI 构建。
 """
 import glob
@@ -30,8 +30,8 @@ else:
     binaries += [(d, "bin") for d in glob.glob("vendor/bin/*.dll")]
 
 datas = [
-    ('vendor/data/caploop.sh', 'data'),
-    ('vendor/so', 'vendor/so'),          # 加密形态的 scrcpy server（运行时解密）
+    ("vendor/data/caploop.sh", "data"),
+    ("vendor/so", "vendor/so"),          # 加密形态的 scrcpy server（运行时解密）
 ]
 
 a = Analysis(
@@ -39,8 +39,8 @@ a = Analysis(
     pathex=[],
     binaries=binaries,
     datas=datas,
-    hiddenimports=['appdirs', 'watchscrcpy.proto', 'watchscrcpy.proto.scrcpy_pb2',
-                   'watchscrcpy.proto.scrcpy_pb2_grpc'],
+    hiddenimports=["appdirs", "watchscrcpy.proto", "watchscrcpy.proto.scrcpy_pb2",
+                   "watchscrcpy.proto.scrcpy_pb2_grpc"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -49,28 +49,42 @@ a = Analysis(
 )
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    [],
-    exclude_binaries=True,
-    name="Wscrcpy",
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=False,
-    console=False,          # GUI 应用：无控制台
-)
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=False,
-    name="Wscrcpy",
-)
-
-if platform.system() == "Darwin":
+if IS_WIN:
+    # Windows：单文件形态（Release 直接分发 Wscrcpy.exe；代价是首启需解压到临时目录）
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.datas,
+        [],
+        name="Wscrcpy",
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        console=False,          # GUI 应用：无控制台
+    )
+else:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name="Wscrcpy",
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        console=False,
+    )
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.datas,
+        strip=False,
+        upx=False,
+        name="Wscrcpy",
+    )
     app = BUNDLE(
         coll,
         name="Wscrcpy.app",

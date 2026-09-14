@@ -86,10 +86,11 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "== [3/4] 整理产物 =="
-if (Test-Path dist\Wscrcpy\Wscrcpy.exe) {
-    Write-Host "完成: dist\Wscrcpy\Wscrcpy.exe（分发整个 dist\Wscrcpy\ 目录即为绿色包）"
+if (Test-Path dist\Wscrcpy.exe) {
+    $size = [math]::Round((Get-Item dist\Wscrcpy.exe).Length / 1MB, 1)
+    Write-Host "完成: dist\Wscrcpy.exe（单文件，$size MB，Release 直接分发）"
 } else {
     Write-Error "构建产物未生成，请检查上方 PyInstaller 日志"
 }
 Write-Host "== [4/4] 冒烟建议 =="
-Write-Host "dist\Wscrcpy\Wscrcpy.exe --probe   # 先跑验证清单（需连接设备）"
+Write-Host "dist\Wscrcpy.exe --probe   # 先跑验证清单（需连接设备）"
