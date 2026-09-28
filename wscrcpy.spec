@@ -26,8 +26,11 @@ if not IS_WIN:
             continue
         binaries += [(d, "."), (d, "bin")]
 else:
-    # Windows：hdc.exe 的伴随 DLL 直接放 exe 旁（DLL 搜索含 exe 所在目录）
-    binaries += [(d, "bin") for d in glob.glob("vendor/bin/*.dll")]
+    # Windows：hdc.exe 的伴随 DLL 直接放 exe 旁（DLL 搜索含 exe 所在目录）。
+    # 与 macOS 侧同样排除 libexternal_hdc —— 它会把 hdc 切到旧版 external server
+    # 并去抢 5037 端口（Windows 上是 .dll 命名），包里绝不能带。
+    binaries += [(d, "bin") for d in glob.glob("vendor/bin/*.dll")
+                 if "libexternal_hdc" not in d]
 
 datas = [
     ("vendor/data/caploop.sh", "data"),

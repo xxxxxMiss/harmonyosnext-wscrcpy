@@ -353,3 +353,501 @@ M1-M4 的截图管线保留为兜底（无 DevEco Testing / 手表等 so 不可�
 - **验证**：模块层 224 帧/6s=37fps、H.264 Annex-B 起始码+SPS 验证；GUI 离屏
   36fps 渲染、录制 mp4（ffprobe h264 608x1344）、截屏、回落路径（fport 残留时
   自动降级）实测；冻结态（DMG 包）stream 录制闭环实测。
+
+---
+
+## 11. 穿戴设备（手表）真机全链路验证 —— 2026-09-23
+
+设备：**HUAWEI 手表 NIZ-AL00**，`const.product.devicetype=wearable`，
+HarmonyOS NEXT **7.0.0.109(SP8C00E100R1P102log)** / API 26 / HongMeng Kernel 1.13.0，
+uitest **7.0.0.1**，屏幕 **466×466 圆屏**，序列号 `7KLB****0444`。
+
+### 11.1 probe 清单 —— 7/7 通过 ✅
+
+| 项 | 结果 |
+|---|---|
+| 连通性 | ✓ `7KLB****0444` |
+| 设备类型 | ✓ **wearable** |
+| 分辨率 | ✓ 466×466（方形帧，圆屏需遮罩） |
+| snapshot 单帧 | ✓ 21021 B，**1.44 s**（手机 0.65 s，约慢 1 倍） |
+| power-shell 唤醒 | ✓ 命令可用 |
+| sh 脚本能力 | ✓ 算术扩展支持 → caploop 可行 |
+| agent 推流通道 | ✓ `agent.so v1.2.2`（uitest 7.0.0.1 / arm64-v8a）→ 见第 12 节 |
+
+### 11.2 流式（H.264）在手表上**不可用** ❌ —— 根因已定位到设备侧
+
+链路各环节其实**都成功**，失败点只在「虚拟屏不产出帧」：
+
+- so 加载：`screencopy_v2_1.3.so` 解密、推送、`uitest start-daemon singleness` 全部成功，
+  so 自打印 `Welcome to xdevice scrcpy so!` / `version: 6.6-20260418`；
+- gRPC：abstract socket `scrcpy_grpc_socket` 正常创建、`hdc fport` 转发 `OK`；
+- 采集初始化：`CreateVirtualScreen: create success. ScreenId: 1003, rsId: 4294967295`
+  → `SetVirtualScreenSurface: success` → `video encoder was successfully started`
+  （`screen 466×466` → `video 234×234 @scale2`）；
+- **但编码器全程零帧**：`VENC_DRV_EncStatics chan 0 input cnt: 0, output cnt: 0`，
+  因此 `onStart` 流永不推送，PC 侧 `DEADLINE_EXCEEDED`（有连接、无帧）。
+- 试过 `-repeatInterval 33` 去掉、`-scale 1`、`bitRate 4M`、`frameRate 30` 四种参数组合，
+  均无帧；另见编码器参数被拒日志 `InputFrameRate:(120) out of range [1,60]` +
+  `SetParamVideoAvc: Parameter of AVC not support`（so 把 repeatInterval 映射成 120fps）。
+- 旁证：daemon 未产出任何 mp4（`saveFrame`/mpr 均空）；`snapshot_display` 同屏幕却正常出图，
+  排除「息屏/黑屏」因素。
+
+**结论**：`gui.py` 的 stream→agent→pull 自动回落是该设备的**正确主路径**，不是异常降级 ——
+手表上 stream 这一档必然失败，但 **agent 档可用且能跑到 30 fps**（第 12 节），
+不需要落到 0.6 fps 的 pull 档。
+
+### 11.3 连拍链路（实际可用路径）实测 ✅
+
+| 模式 | 帧率 | 单帧耗时 | 黑帧 | 错误帧 | 产物 |
+|---|---|---|---|---|---|
+| pull（PC 逐帧驱动） | 13 帧/20s = **0.61 fps** | 1.64 s | 0 | 0 | 平均 24.9 KB |
+| loop（设备端 caploop.sh） | 14 帧/20s = **0.69 fps** | — | 0 | 0 | 平均 24.8 KB |
+
+- loop 模式真机可行：脚本经 `hdc file send` + `nohup sh` 后台跑，停止后设备进程
+  **正确退出**（`pidof` 空、seq 停在 14）。
+- 录制闭环：15 s 采集 9 帧 → ffconcat VFR 合成 → **H.264 932×932 mp4**（466×466×2），
+  `nb_frames=10`，`duration=13.52 s`，中间帧目录自动清理。
+- GUI 端到端（offscreen）：识别 wearable → **自动开启圆形遮罩** → 回落 pull →
+  渲染 9 帧 466×466，状态栏与掉线回退正常。
+- 截图：`--shot` 落盘 24923 B JPEG；`_round_mask` 四角 alpha=0、中心不透明，圆遮罩正确。
+- 帧内容判别：灰度范围 0–255、非黑占比 62.8%、中心 226 / 四角 0 → 圆屏表盘内容真实。
+
+### 11.4 验证中发现并修复的 bug —— 资源解析（开发态）
+
+`watchscrcpy/resources.py`：
+
+1. `resource_path("bin" / Path(...))`、`resource_path("data" / "caploop.sh")` 用 `/`
+   拼 **str**，Python 3.9+ 直接 `TypeError`（`--mode loop` 必崩）；
+2. 开发态 `_candidate_roots()` 只收录仓库根，导致内置资源找不到：`find_hdc`/`find_ffmpeg`
+   静默落到本机 SDK，`find_caploop_script` 抛异常。
+
+修复：`/` 改为 `os.path.join`；开发态候选根补 `root/"vendor"` 与 `root`。
+修后 `find_hdc→vendor/bin/hdc`、`find_ffmpeg→vendor/bin/ffmpeg`、
+`find_caploop_script→vendor/data/caploop.sh` 全部命中，内置 hdc 在本手表上
+`list targets` 与 `shell` 均正常。打包态（frozen）行为不变。
+
+### 11.5 遗留
+
+- 流式若要上手表，需解决虚拟屏零帧（当前无三方可行手段；`Ohos` 侧需系统签名/多屏支持）。
+- `libexternal_hdc.dylib` 在 macOS 上因 Team ID 签名不符无法 dlopen，hdc 打该 dylib 的
+  扩展符号时打印 `[F]` 噪音，但**不影响** `list/shell/file/fport`（已实测，与 build.sh
+  刻意排除该 dylib 的决策一致）。
+- 手表帧率上限 ≈ 0.7 fps，由 `snapshot_display` 单帧 1.44 s 决定，非传输瓶颈。
+  —— **2026-09-23 已由第 12 节推翻**：agent 档实测 30 fps。
+
+## 12. 手表投屏第三通道：uitest `agent.so` 变化触发推流 ✅ 完成 2026-09-23
+
+> 完整协议逆向记录见 [`research/agent.so协议逆向.md`](research/agent.so协议逆向.md)。
+> 实现见 `watchscrcpy/agent.py`（`AgentCapture` / `AgentClient` / `AgentProbe`）。
+
+### 12.1 一句话结论
+
+`uitest start-daemon` 的 extension 机制可以把华为自带的 `uitest_agent_v1.2.2.so`
+装进 `uitest` 进程，走 DMS 的截图监听通道**由设备端主动推 JPEG**。
+手表实测**连续滚动时 30.8 fps**（pull 档 0.61 fps 的 50 倍；低变化画面 1.3~14 fps，
+见 12.3），启停干净、录制裁剪闭环通过。
+`--mode agent` 已接入 CLI/GUI，并成为 `auto` 回落链的第二档（stream → **agent** → pull）。
+
+### 12.2 线协议要点（踩坑最久的一条：sid 决定应答分帧）
+
+```
+HEAD(28B "_uitestkit_rpc_message_head_") | sessionId u32be | len u32be | payload | TAIL(28B)
+```
+
+| 请求 sid | 应答形态 |
+|---|---|
+| `<= 0xFFFF` | **裸 `JSON\n`**（无分帧）——DevEco 遗留路径 |
+| `> 0xFFFF` | **完整分帧** ← hdckit 走这条，本实现固定用 32 位随机 sid |
+
+推流帧复用同一种帧格式，其 `sessionId` 等于 `startCaptureScreen` 那一笔请求的 sid。
+若用小于 64K 的 sid，推流帧没有长度前缀，只能靠 SOI/EOI 硬切，粘包即崩。
+
+`scale` 必须**严格 < 1.0**（`1.0` 返回 `{"result":null,"exception":""}` 且不报错，
+正是 hdckit 里 `if (scale >= 1) delete options.scale` 的由来）。
+
+### 12.3 实测（HUAWEI watch NIZ-AL00，466×466 圆屏）
+
+> ⚠ agent 档的帧率 **等于画面实际变化率**，不是固定帧率。下表 `heartbeat=0`
+> （只统计真实变化帧）按画面内容分档实测，同一台表同一份代码可差 20 倍以上 ——
+> 引用数字时必须带上画面条件。
+
+| 画面内容 | agent 实测帧率 |
+|---|---|
+| 静态页面（无任何变化） | **0.00 fps**（设备端根本不推帧） |
+| 表盘 / 自带动画页面 | ~1.3 fps（设备端自己就在推） |
+| 垂直上滑（列表滚动） | 13.9 fps |
+| 水平滑动 | 9.2 fps |
+| 单击 | 1.4 fps |
+| 连续滚动 / 动画 | **30.79 fps**（472 帧 / 15.3 s，本仓库测到的峰值） |
+
+| 其它指标 | pull 档 | **agent 档** |
+|---|---|---|
+| 单帧 | 24.9 KB @466² | **8.2 KB @233²**（scale 0.5），min 4.1 KB / max 12.5 KB |
+| 首帧延迟 | 1.6 s | 9~22 s（推 so + 起 daemon + 握手 + 首帧兜底） |
+| 黑帧 / 错误帧 | 0 / 0 | 0 / 0 |
+| 帧尺寸一致性 | 466×466 | 全部 = 233×233 |
+| 停止耗时 | — | 0.00 s，线程正常 join |
+
+- **静止画面 0 帧**（严格变化触发）→ 客户端 `heartbeat=1.0` 重发上一帧，把下限抬到
+  ~1 fps 并保证录制时间轴连续（实测静止时 0.92 fps）。
+- 首帧兜底：开流 1.5 s 无帧则用一次 `snapshot_display`，并**缩放到推流尺寸**后送出
+  （466² 与 233² 混帧会让 ffconcat 合成失败）。
+- scale ↔ 分辨率：0.99→461²、0.9→419²、0.5→233²、0.25→117²（均 `{"result":true}`）。
+
+### 12.4 GUI / 录制端到端（offscreen，mode=agent）✅
+
+```
+effective_mode=agent   round=True（wearable 自动圆遮罩）   cap=AgentCapture scale=0.5
+① 高变化画面：渲染 426 帧 / 15.0 s = 28.37 fps
+   产物 gui_agent_rec.mp4 744000 B → ffprobe: h264 232×232, nb_frames=437, duration=24.80s
+② 低变化画面（同一脚本、同一代码，仅画面内容不同）：27 帧 / 15.0 s = 1.80 fps
+   产物 gui_agent_rec.mp4 36397 B  → ffprobe: h264 232×232, nb_frames=30,  duration=15.36s
+清理：pidof uitest 空、/data/local/tmp/agent.so 已删
+```
+
+`auto` 回归：`effective_mode=agent`、`pull` 档独立可用（首帧 2.2 s，~0.50 fps）。
+会话健壮性：**连续静止 112 s 不掉线**；`power-shell suspend`（息屏）也不会中断推流会话，
+唤醒后继续出帧（20 s 内 31 帧）。
+
+### 12.5 接入 GUI 时发现并修复的 3 个真 bug
+
+1. **失败回落后残留的 `H264Stream` 会杀掉 agent 的 daemon**（最隐蔽的一个）。
+   `H264Stream._teardown()` 会 `pkill -9 -f 'uitest.*start-daemon'`，而 agent 档用的正是
+   同一个 `singleness` daemon。`auto` 链里 stream 档失败后对象仍挂在窗口上，
+   关窗时 `stop()` 收尾它就顺手把 agent 正在用的 daemon 杀了 ——
+   现象是「点关闭后 0.3 s 报 agent 推流中断 / 设备连接已断开」。
+   修法：回落时立刻 `_teardown_stream()`；并把 `stop()` / `_enter_disconnected()` 的顺序
+   改成**先停帧采集、后收 stream**。
+2. **wearable 直接跳过 stream 档**：手表虚拟屏零帧（11.2），这一档必然失败却要耗
+   10~15 s 才超时；`_mode_chain()` 见到 `wearable` 就移除，启动路径直接走 agent。
+3. `_on_status(text, err)` 少传参数（`TypeError`）：异常从 `_start_capture` 抛到 Qt 槽，
+   顺手**阻断了 `_connect` 里后续的自动录制**；已补默认值 `err=False`。
+
+### 12.6 新增/改动文件
+
+| 文件 | 说明 |
+|---|---|
+| `watchscrcpy/agent.py` | **新增** 协议实现：`AgentClient`（分帧/握手/推流）、`AgentProbe`（版本探测与 so 查找）、`AgentCapture`（`BaseCapture` 子类：推流 + 首帧兜底 + 心跳 + 建链失败换端口重试） |
+| `watchscrcpy/gui.py` | 回落链 `_MODE_CHAINS` / `_mode_chain`（wearable 跳过 stream）、`_start_agent`、`_teardown_stream`、收尾顺序修正、`_on_status(err=)` 默认值 |
+| `wscrcpy.py` | `--mode auto\|stream\|agent\|pull\|loop`、`--agent-scale`、`--agent-so`；probe 增加第 7 项 |
+| `research/agent.so协议逆向.md` | 逆向全过程记录（证据、失败路径、复现脚本） |
+
+### 12.7 设备侧准备与三个设备/工具链坑
+
+```bash
+hdc shell param set persist.ace.testmode.enabled 1
+hdc file send uitest_agent_v1.2.2.so /data/local/tmp/agent.so && hdc shell chmod 755 …
+hdc shell "pkill -9 -f 'uitest.*start-daemon'"
+hdc shell uitest start-daemon singleness          # 不带 --extension-name
+hdc fport tcp:29400 localabstract:uitest_socket
+```
+
+1. **只有 abstract socket**：unix-socket 模式下 daemon 不监听 TCP 8012
+   （hdckit 写死 8012 是面向旧设备），必须 `fport … localabstract:uitest_socket`。
+2. **`fport rm` 在本套 hdc/手表上恒失败**（`[Fail]…ruler is not exist`，rc=0），
+   残留转发只能 `hdc kill && hdc start` 清。但它指向的是 `@uitest_socket`，
+   daemon 重建同名 socket 后**这条转发依然可用** → 实现里只要 `fport ls` 里已有就直接
+   复用，省掉必然失败的 add，也不再累积新残留；只有 add 真失败（端口被占）才换端口
+   （实测 29400 被占时自动轮到 29558）。若复用到的残留已失效，`run()` 会换端口重试一次。
+3. `uitest start-daemon` **偶发**不建 socket：整段序列重试 3 次，失败时把
+   `start-daemon` 输出 + `pidof uitest` 一起写进异常。
+
+### 12.8 遗留 / 限制
+
+- **`agent.so` 不可随包分发**（华为版权二进制）：运行时从本机 DevEco Testing 安装目录、
+  hdckit 的 `node_modules` 或 `WSCRCPY_AGENT_SO` / `vendor/so` 提取；
+  未找到时 `auto` 链会自动跳过 agent 档。
+- 静止画面依赖客户端心跳，设备端无「固定间隔推流」选项（`options` 只解析 `scale`/`displayId`）。
+- 仅在 arm64 手表 + uitest 7.0.0.1 上验证；x86_64 与旧 uitest（1.1.x so）未跑通实机。
+- `Captures / captureScreen`、`screenshot` 为未知名，调用会**打挂连接**，勿试。
+
+## 13. 打包与分发验收 —— 2026-09-24
+
+### 13.1 产物
+
+| 产物 | 大小 | 校验 |
+|---|---|---|
+| `dist/Wscrcpy.app` | 237 MB | `codesign --verify` = valid on disk / satisfies its DR |
+| `dist/Wscrcpy-macOS-app.zip` | 91.8 MB | 用 `ditto -c -k --sequesterRsrc --keepParent` 打包，解压后签名仍有效 |
+| `Wscrcpy-macOS.dmg` | — | **本环境未生成**，原因见 13.4 |
+
+### 13.2 打包态真机验证 ✅
+
+1. **资源解析（frozen）** —— 新增 `--selfcheck`（不需要设备）：
+
+```
+1. 运行形态          打包 frozen
+2. 资源根            …/Wscrcpy.app/Contents/Frameworks
+4. hdc              ✓  [内置] …/Contents/Frameworks/bin/hdc
+5. ffmpeg           ✓  [内置] …/Contents/Frameworks/bin/ffmpeg
+6. caploop.sh       ✓  [内置] …/Contents/Frameworks/data/caploop.sh
+7. agent.so          ✓  [本机] /Applications/DevEco_Testing_for_App.app/…/uitest_agent_v1.2.2.so
+9. 内置 vendor/so     ['screencopy_v2_1.2.so', 'screencopy_v2_1.3.so']
+```
+
+2. **打包版 `--probe` 真机 7/7 通过**（含第 7 项 `agent.so v1.2.2`）。
+3. **打包版 GUI（offscreen）+ agent + 录制**：自动跳过 stream 档 →
+   `agent 模式: agent.so v1.2.2（uitest 7.0.0.1 / arm64-v8a）` → 推流中；
+   采到 **26 帧，全部 233×233**；用**包内 ffmpeg** 合成 → `h264 232×232, 27 帧, 2.64 s`。
+   （合成用的是 bundle 里的 `Contents/Frameworks/bin/ffmpeg`，证明内置二进制可用。）
+
+### 13.3 验收过程中修掉的问题
+
+1. **写不了日志文件就整个启动失败**（真实脆弱点）。`resources.setup_logging()` 直接
+   `RotatingFileHandler(~/Library/Logs/wscrcpy.log)`，该路径不可写时抛 `PermissionError`；
+   而它发生在 `sys.excepthook` 安装**之前**，双击启动的表现是「什么都不发生」。
+   改为三级降级：首选路径 → 系统临时目录 → 仅 stderr，返回实际路径（stderr 时为空串）。
+2. **`build.sh` 的 DMG 步骤会被上次的残留挂载卡住**：上次构建的 DMG 在 Finder 里开过、
+   没推出时，`/Volumes/Wscrcpy*` 占着卷名，`hdiutil create` 报「目录非空」。
+   已加守卫：只卸载**指向本仓库 DMG** 的挂载点（按 `hdiutil info` 的 image-path 匹配）。
+3. **新增 `--selfcheck`**：不连设备即可确认打包后 hdc/ffmpeg/agent.so 的解析结果，
+   专门用于排查「装完提示找不到 hdc / agent.so」这类分发问题。
+
+### 13.4 已知环境约束
+
+- `hdiutil create` 需要写 `/dev/rdisk*` 才能格式化新卷；在受限/沙箱环境里会失败，
+  且错误消息被错映射成 `create failed - 目录非空`，真因要从 `-verbose` 里看：
+  `newfs_apfs: /dev/rdisk19s1: Operation not permitted`。普通终端执行 `./build.sh` 无此问题。
+- **`agent.so` 仍未内置**（版权），打包产物在装有 DevEco Testing 的机器上自动命中，
+  在没装的机器上 `auto` 链会跳过 agent 档、退到 pull。
+
+## 14. 「连不上 / 一直 loading」根因定位与修复 —— 2026-09-24
+
+现场报障：**设备已插着，但程序查不到设备，界面一直卡在 loading**。
+
+### 14.1 定位过程与关键证据
+
+1. 先确认不是设备/工具链问题：`hdc list targets` 能看到 `7KLB****0444`，
+   `param get const.product.devicetype` = `wearable`，`uitest --version` 1.0s 返回，
+   `cat /proc/net/unix` 0.2s 返回 —— 底层链路当时是通的，问题在客户端。
+2. 翻 `~/Library/Logs/wscrcpy.log`，最后一轮是这样收尾的：
+
+   ```
+   18:33:59 mirror start: mode=auto
+   18:34:00 status: 未发现设备
+   18:34:21 wearable 设备跳过 stream 档（虚拟屏零帧）      ← 之后什么都没有了
+   ```
+
+   `connected:` 与 `agent 模式:` 两行**都缺**。而代码里 `logging.info("connected: ...")`
+   写在 `_start_capture()` **之后**，所以卡点必然在 `_start_capture()` 内部。
+3. 用慢 hdc 替身复现（`list targets` 睡 11s，超过当时的 10s 超时）：
+
+   ```
+   [t=10s] status='正在扫描设备…' btn='扫描中…' enabled=False visible=True scanning=True
+   Exception in thread Thread-1: subprocess.TimeoutExpired: ... timed out after 10 seconds
+   [t=40s] status='正在扫描设备…' btn='扫描中…' enabled=False visible=True scanning=True
+   ```
+
+   与用户描述完全一致：**永久 loading，且刷新按钮是 disabled 的，点不动**。
+
+### 14.2 根因（三条，全在客户端）
+
+| # | 位置 | 问题 |
+|---|------|------|
+| 1 | `Hdc.list_devices` | 只捕获 `FileNotFoundError`；`subprocess.TimeoutExpired` 逃出去，而调用方 `refresh().work()` 只捕获 `HdcError` → **扫描线程未捕获异常直接死掉**，`_scanning` 永远为 `True`，按钮永久「扫描中…」禁用 |
+| 2 | `Hdc._run` / `list_devices` | `subprocess.run(timeout=)` 在 hdc 上**并不保险**：hdc 首次调用会 fork 出常驻 server 并继承 stdout/stderr 管道；超时后 `run()` kill 掉客户端**又** `communicate()` 等管道 EOF —— 该管道被 server 一直持有，永不 EOF，于是「带 timeout」的调用可以永久挂住 |
+| 3 | `MirrorWindow._enter_connected` | UI 线程上做 hdc I/O：`device_type()`（2 次 shell）+ `_start_capture()` → `agent_supported()`（2 次 shell），最坏几十秒；一旦卡住整个窗口冻结，而刷新按钮此刻已被 `_set_connected_ui(True)` 隐藏 → 只能强杀进程 |
+
+补充一个连带 bug：`_enter_connected` 会直接建新采集，**不先收旧的**。重连/重试时新旧两个
+`AgentCapture` 抢同一个 fport/端口，表现成「刚连上就报设备连接已断开」。修复前实测能稳定复现。
+
+### 14.3 修复
+
+- **`_spawn()` 统一子进程出口**：新开进程组（`start_new_session`）+ 超时 `killpg`
+  连整组一起杀 + 收尾读取只再等 3s，`_run()` 与 `list_devices()` 都改走它 —— 再也不会有
+  「说了超时却永久挂着」的调用。
+- **`list_devices` 异常全收口**：`TimeoutExpired` → `HdcError`（带可操作提示），
+  超时 10s → **20s 且重试 1 次**（首次调用常要拉起 hdc server，比后续慢得多），
+  并支持 `on_progress` 回调把「正在重试」实时写进状态栏；非零退出码不再被当成空列表。
+- **扫描线程兜底**：`work()` 改为 `except Exception` + `finally: emit(payload)` ——
+  无论成败都必须回报，否则 UI 永远等不到 `scan_done`。
+- **阻塞探测搬出 UI 线程**：`device_type()` 与 `agent_supported()` 挪到扫描线程一次探好，
+  经 payload 回传（`_agent_probe` 缓存）；`_start_agent()` 只读缓存。
+- **启动看门狗**：连上后 45s 仍 0 帧，就提示「启动超时仍未收到画面」并把
+  「⟳ 刷新」放回来 —— 保证任何情况下都有一条退路。
+- **`_teardown_capture()`**：重连前先停/join 旧采集线程 + 收 stream 残留，消除双采集互抢。
+- 日志顺序调整：`connected: <sn> dtype=<...>` 现在打在 `_start_capture()` **之前**，
+  下次再卡住至少知道卡在哪一步。
+
+### 14.4 修复验证（全部实跑）
+
+| 场景 | 结果 |
+|------|------|
+| 慢 hdc 25s（> 20s 超时） | t=25s 状态栏显示「hdc 无响应（20s 超时），正在重试…」；t=45s 显示可操作提示、按钮恢复「⟳ 刷新」可点；**不再永久 loading** |
+| 随后换回真 hdc 点刷新 | 正常连上 → `agent` 档 → `实时画面正常`，持续出帧 63 帧 |
+| 扫描线程抛非 `HdcError`（`RuntimeError`） | 状态栏「扫描异常：RuntimeError: …」，按钮恢复可用，异常带栈写入日志 |
+| 连上后始终 0 帧（看门狗） | t=5s 仍隐按钮（投屏态）；t=48s 提示「启动超时仍未收到画面：可点「⟳ 刷新」重试…」且按钮可见可点 |
+| 重连（原先「刚连上就报断开」） | 不再复现，重连后画面正常持续输出 |
+
+### 14.5 环境侧观察（需要用的人自己确认）
+
+定位期间手表**一度整体从 USB 总线消失**：`ioreg -p IOUSB` 只剩 hub 与网卡，
+两个 hdc 版本（3.2.0c / 1.2.0a）的 `list targets` 都是 `[Empty]`。
+这与日志里 18:29~18:34 的间歇性 `未发现设备`（三次启动都是 0.5s 内返回空）吻合，
+说明**设备侧连接本身在抖动**（接触不良 / 手表休眠 / 调试授权未确认），不是程序造成的。
+遇到这种情况：重插 USB、点亮手表、确认屏幕上的「是否允许调试」对话框，
+必要时在终端 `hdc kill && hdc start` 清掉服务端残留。
+
+### 14.6 追加定位（同日第二次报障）：**agent.so 查找把整个磁盘走了一遍** ⚠ 最深的坑
+
+修完 14.1~14.4 后现场仍是「设备已连接但找不到」。用 `/usr/bin/sample` 抓运行中的
+进程栈，发现 Python 线程**不是阻塞，而是在热跑 `readdir`** —— 它在遍历目录。
+
+根因在 `agent.py` 的 so 查找：`_HDCKIT_SO_GLOBS` 里有一条**相对**模式
+
+```python
+"**/node_modules/hdckit/uitestkit_sdk/*.so"        # 交给 glob.glob(..., recursive=True)
+```
+
+`glob` 的**相对模式以进程 CWD 为起点**展开。而 **Finder 双击启动的 .app，其 CWD 是 `/`**
+（`lsof -p <pid>` 实测 `cwd DIR /`），于是每次查 agent.so 都变成**全盘递归遍历**：
+
+| 进程 CWD | `_find_so_files()` 耗时 |
+|---|---|
+| `/`（双击启动的真实形态） | **70s 仍未结束**（被掐断） |
+| 仓库目录（脚本启动，CWD 恰好是仓库） | 3.7s |
+
+这也解释了为什么以前"很快"：**agent 通道是 9/24 才加的**，更早的版本根本不会调用这段
+查找。而我在 14.3 里把 `agent_supported()`（→`find_agent_so`）挪到了扫描线程，
+于是"找不到设备"就成了扫描的直接阻塞项 —— 现象变成「一直 loading」。
+
+**修法（`agent.py`）**：
+
+1. **全部绝对锚定**：删掉两条相对 `**` 模式，改为绝对路径的定向模式
+   （`<root>/DevEco*Testing*.app/Contents/Python/lib/python3.12/site-packages/
+   devicetest/res/prototype/native/uitest_agent_v*.so` 等，每级只用 `*` 不用 `**`）。
+2. **三级查找**：已知目录（零遍历）→ 定向模式 → **有界遍历**（深度 10 / 600 个目录 /
+   0.75s 三重预算，不跟随符号链接，`node_modules` 只下一层找 `hdckit`）。
+3. **结果缓存**：命中长期缓存，空结果缓存 300s —— 扫描每次都会调这里，不能每次都走目录。
+4. 预算**在层间和单个目录内部都要检查**：第一版只在每层开头判一次，撞上一个超大目录
+   就超预算 4~15 倍（实测 15.4s / 4.3s）；改成就地每 128 条目判一次后为 **0.14s**。
+5. **同类坑一并清掉**：`--probe` 原来把单帧写成相对路径 `probe_frame.jpeg` —— CWD=`/`
+   时直接 `PermissionError: 'probe_frame.jpeg'`，把整条 probe 打断（4~7 项全不跑）。
+   已改为绝对路径（优先桌面，不可写退系统临时目录），并在输出里打印实际落盘位置。
+   至此全仓库不再有依赖 CWD 的路径（`glob` 用法全部绝对锚定）。
+
+**验证**：
+
+| 项 | 结果 |
+|---|---|
+| `_find_so_files()` @ CWD=/ | **70s+ → 0.002s**，仍返回同样的 4 个 so |
+| `find_agent_so('7.0.0.1','arm64-v8a')` @ CWD=/ | 0.000s → `uitest_agent_v1.2.2.so` |
+| 定向模式（架空已知目录后单独测） | 0.008s，独立找到全部 4 个 so |
+| 有界遍历 | 0.14s / 0.02s，预算内 |
+| 端到端（`cd /` 启动，即双击形态） | 4.2s 已进入 `agent 模式：启动中` → dtype=wearable → 持续出帧 20 帧 |
+
+**教训（值得记住的一条）**：任何 `glob` / 相对路径都隐含"CWD 是什么"这个前提，
+而 GUI 双击启动时 CWD 是 `/`。要么绝对锚定，要么把预算写死。
+
+## 15. 「画面不清晰」根因与修复 —— 2026-09-24
+
+报障：录制已正常，但投屏/录制的画面明显发糊。
+
+先列嫌疑，再逐条用真机/离屏渲染实测，**不靠猜**：
+
+| # | 嫌疑 | 判定 | 证据 |
+|---|---|---|---|
+| 1 | agent 默认 `scale=0.5` → 推流只有 233×233 | ✅ **主因** | 真机实测 233×233 / 6.2 KB，而原生 `snapshot_display` 是 466×466 / 25.6 KB |
+| 2 | Retina 上先缩到逻辑像素、再由 Qt 放大到 2x 背板（两次重采样） | ✅ **次因** | 离屏 Qt 实测 `dpr=2`：老路径 Pixmap 638×638(dpr=1) → 合成器再放大 2.00x 到 1276 |
+| 3 | 合成 mp4 时 libx264 二次有损编码 | ❌ 排除 | `-crf 23` 对源帧 **PSNR 46.5 dB**（`-crf 17` 51.6 dB）—— 46 dB 已在视觉无损区，不是糊的来源 |
+| 4 | 手表屏幕本身只有 466×466 | ⚠️ 上限 | 原生截图实测 466×466；**任何**录制的上限就是这个数，放到 1440p 全屏必然显软 |
+
+### 15.1 量化（真机原生截图 → 放大到 1276 物理像素，拉普拉斯方差 = 高频能量）
+
+| 流程 | 高频能量 | 相对理想 |
+|---|---|---|
+| 理想：466 源一次放大 | 76.3 | 100% |
+| **修复后**：462 源（≈原生）一次放大 | **41.1** | 54% |
+| 修复前：233 源（scale 0.5）一次放大 | 9.3 | 12% |
+| **修复前真实路径**：233 源 + 双重重采样 | **5.0** | **6.6%** |
+
+即：修复前的高频细节只剩理想的 ~7%，修复后回到 ~54%（余下差值来自 Qt 平滑插值与 462/466 的采样差）。
+老路径的两次重采样单独也会让高频能量掉一半（34.2 → 70.6，同一源同一目标尺寸）。
+
+### 15.2 scale 提到 0.99 的代价（真机实测，HUAWEI NIZ-AL00）
+
+| scale | 推流分辨率 | 单帧 | 带宽 | 帧率 |
+|---|---|---|---|---|
+| 0.5 | 233×233 | 6.2 KB | 27~67 KB/s | 4.12 fps（对照 1.68） |
+| **0.99（新默认）** | **462×462** | **15.5~24.8 KB** | **129~340 KB/s** | **4.30 fps（对照 21.41）** |
+
+帧率由**画面变化率**决定（变化触发），两组对照里 0.99 都不低于 0.5；带宽几百 KB/s 在
+USB 上可忽略。**没有任何理由为了省流量把画质砍成 1/4 像素。**
+
+### 15.3 修复
+
+1. `agent_scale` 默认 `0.5 → 0.99`（`AgentCapture` / `AgentClient` / CLI / GUI 四处默认值统一）。
+2. GUI 底部新增「**◐ 画质**」档位按钮：原生 0.99（462×462）/ 清晰 0.8 / 流畅 0.5，
+   点击即切换并**按新档重启采集**；`pull` 档下按钮置灰（它本身就是原生截图，无需档位）。
+3. HUD 增加**采集侧真实分辨率**（`FRM 0123 462×462`）：一眼区分"源分辨率低"还是"窗口放大"。
+4. `VideoPanel.set_frame()` 改为按**物理像素**缩放再 `setDevicePixelRatio(dpr)`，
+   绘制矩形用 `deviceIndependentSize()` 换算 —— 高清屏上只采样一次。
+
+**顺带被"真机实跑"逼出来的三个 bug**（不实跑就发现不了，代码看着都对）：
+
+5. **画质切换会把新采集打死**：`AgentCapture` 收尾时会 `pkill uitest.*start-daemon` 并删
+   设备上的 `agent.so`。第一版切换在 UI 线程 `_teardown_capture()`（join 3s）后立刻起
+   新采集 —— 旧线程没死透，它的 `pkill` 把**新 daemon** 一起杀了。实测现象：
+   「切完画质 2 秒后报设备连接已断开」。修法：收旧采集放到**工作线程**并 `wait=20s`
+   等它真退出，收干净后用信号回 UI 线程再起新采集；切换期间置灰按钮 + 置位防重入。
+6. **看门狗定时器越攒越多**：`_arm_bringup_watchdog()` 原来每次都 `QTimer(self)` 新建一个，
+   旧定时器被 parent 持有不会销毁 —— 切几次画质就攒下一串旧定时器，它们会在新采集刚启动、
+   还没出首帧时跳「启动超时仍未收到画面」的**假警报**（实测日志里出现过）。
+   修法：定时器只建一次，重复 arm 只是 `start(45000)` 重置计时；掉线时主动 `stop()`。
+7. **设备版本读不到时会静默选错 so**：`find_agent_so()` 走
+   `agent_so_version("") → "1.1.3"`（那是 uitest 5.x 之前老协议的默认值），然后**精确匹配**
+   命中本机的 1.1.3 —— 在新设备上等于主动选错 so，且只留一条 INFO 日志。
+   修法：版本字段读不全（`<3` 段）时不走精确匹配，直接取最新同架构 so 并 **WARNING 留痕**。
+8. `agent.py` 增一行日志 `agent 推流尺寸 462x462（设备显示 466x466，scale=0.99）`：
+   清晰度类问题的第一现场证据，省得再靠猜。
+
+### 15.4 验证
+
+| 项 | 结果 |
+|---|---|
+| 真机 agent @0.99 | 收帧 462×462，单帧 15.5~24.8 KB（与原生截图 25.6 KB 同量级） |
+| 离屏 Qt `dpr=2` | 新路径 pixmap 1276×1276(dpr=2)，绘制矩形 638 逻辑 = 1276 物理 → **1:1，无二次放大** |
+| 高频能量（同上表） | 5.0 → 41.1（8 倍） |
+| **离屏跑真 GUI（真代码 + 真机）** | 初始 462×462 → 点一下 373×373 → 再点 233×233 → 再点回 462×462，**全程 status=实时画面正常，无掉线** |
+| 看门狗假警报 | 切档时刻刻意压在旧定时器到点前 → 全程 **0 次**「启动超时」 |
+| so 选择 | `7.0.0.1→1.2.2`、`6.0.2.1→1.1.10`、`5.1.1.2→1.1.5`、`5.0.0.1→1.1.3`、**未知→1.2.2** |
+| 打包产物 | 见 15.5 |
+
+### 15.5 打包产物验证（CWD=/，双击形态）
+
+| 项 | 结果 |
+|---|---|
+| `dist/Wscrcpy.app` 从 `/` 启动 | 日志 `agent 推流尺寸 462x462（设备显示 466x466，scale=0.99）`，进入推流 |
+| 打包版 `--probe` | 7/7 通过 |
+
+**教训**：清晰度这种事必须**量**——"糊"的三个嫌疑里，编码器那条实测是 46 dB（无害），
+真正吃像素的是默认参数和一次多余的重采样。另外，帧率与 scale 无关（变化触发模型），
+"降分辨率换帧率"在这个通道上根本不成立，属于白丢画质。
+**第二条教训**：新加的交互（切档重启采集）必须**真跑一遍完整状态机** ——
+上面 5/6/7 三个 bug 都是"逐行看代码没问题、一跑就现形"的那类。
+
+### 15.6 追加：推流尺寸是 `ceil(分辨率×scale)`，不是 `round`
+
+核对"日志说 461、HUD 说 462"这个不一致时发现的：
+
+| scale | 466×scale | 设备实测推流 | round | ceil | floor |
+|---|---|---|---|---|---|
+| 0.99 | 461.34 | **462** | 461 ✗ | 462 ✓ | 461 ✗ |
+| 0.8  | 372.8  | **373** | 373 ✓ | 373 ✓ | 372 ✗ |
+| 0.7  | 326.2  | （未取到帧） | 326 | 327 | 326 |
+| 0.6  | 279.6  | **280** | 280 ✓ | 280 ✓ | 279 ✗ |
+| 0.5  | 233.0  | **233** | 233 ✓ | 233 ✓ | 233 ✓ |
+
+唯一能同时解释 0.99→462、0.6→280、0.5→233 的是 **ceil**（`int(x)+1` 被 0.5→233 否掉）。
+客户端原先用 `round` 算 `_stream_size`，于是首帧兜底图会被缩成 461×461，而设备推流是
+462×462 —— **一录进去就是混尺寸**。
+
+- 修：`_stream_size` 改用 `math.ceil`（`agent.py`），画质提示里的 ≈ 尺寸同步改；
+- 加固：`Recorder._normalize()` 以**首帧尺寸为基准**，遇到不一致的帧就地 LANCZOS 缩放
+  （尺寸用 SOF 头读，不做整帧解码；只有真不一致才解码）。`ffconcat` 要求尺寸统一，
+  一旦混进一张不同尺寸的（首帧兜底、切换采集档、设备端取整差异……）ffmpeg 会
+  `Input link parameters do not match` 直接失败 —— 这个加固把整类问题一次消掉。
+  单测：喂 `[461,462,462,373,462,462]` → 落盘全部 461×461，合成成功（mp4 460×460，
+  之所以 460 是合成里 `trunc(iw*1/2)*2` 的偶数对齐）。
+- 顺带把 `parse_jpeg_size` 从 `agent.py` 下移到 `capture.py`（两处都要用；`agent.parse_jpeg_size`
+  保留为导入别名，旧调用不受影响）。

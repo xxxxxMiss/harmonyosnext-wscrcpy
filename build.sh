@@ -35,6 +35,11 @@ fi
 # hdc 非单文件二进制：同目录动态库一并打包（libusb_shared 为链接依赖；
 # libexternal_hdc 会把 hdc 切到旧版 external server，刻意不打包）
 TC_DIR=$(dirname "$HDC_SRC")
+# 只"跳过拷贝"不够：vendor/bin 里若留着**上一次构建**（或手工拷入）的旧 libexternal_hdc.dylib，
+# hdc 仍会去 dlopen 它，dev 态每次调用都刷一屏
+#   [F] uv_dlopen failed … code signature … not valid for use in process（Team ID 不一致）
+# 看着像产品 bug，其实是残留文件。这里直接删掉，保证 vendor/bin 干净。
+rm -f vendor/bin/libexternal_hdc.dylib
 shopt -s nullglob
 for dy in "$TC_DIR"/*.dylib; do
     case "$(basename "$dy")" in
@@ -65,6 +70,14 @@ codesign --force --deep --sign - dist/Wscrcpy.app 2>/dev/null || echo "(跳过�
 
 echo "== [4/4] DMG 安装包 =="
 rm -rf /tmp/dmg-staging Wscrcpy-macOS.dmg
+# 上一次构建的 DMG 若还挂在 /Volumes/Wscrcpy*（Finder 里双击过没推出），
+# 卷名被占用会让下面的 create 报 "目录非空"。只卸载**指向本仓库 DMG** 的挂载点。
+for dev in $(hdiutil info 2>/dev/null \
+        | awk -v p="$PWD/Wscrcpy-macOS.dmg" \
+          '/^image-path/{img=$3} /^\/dev\/disk/{if (img==p) print $1}'); do
+    echo "卸载上次构建的残留挂载 $dev"
+    hdiutil detach "$dev" >/dev/null 2>&1 || true
+done
 mkdir -p /tmp/dmg-staging
 cp -R dist/Wscrcpy.app /tmp/dmg-staging/
 ln -s /Applications /tmp/dmg-staging/Applications   # 拖拽安装

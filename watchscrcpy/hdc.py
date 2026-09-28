@@ -6,12 +6,14 @@
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
+import signal
 import subprocess
 import tempfile
 import time
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from . import resources
 
@@ -35,6 +37,51 @@ class HdcError(RuntimeError):
     pass
 
 
+def _spawn(cmd: List[str], timeout: float):
+    """跑一个可能卡住的子进程；超时**连同整组进程一起杀**，保证一定返回。
+
+    为什么不能直接用 `subprocess.run(timeout=)`（踩过的坑）：
+    hdc 首次调用会 fork 出常驻的 hdc server，而 server 继承了客户端的 stdout/stderr
+    管道。`run()` 超时后只 kill 客户端，**然后又调一次 `communicate()` 等 EOF** ——
+    那个管道被 server 一直持有，永远不会 EOF，于是「带 timeout」的调用实际会永久挂住。
+    这里新开进程组 + 超时 killpg + 收尾读取再兜一层短超时，杜绝死等。
+    """
+    kwargs = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
+    if os.name == "posix":
+        kwargs["start_new_session"] = True
+    else:
+        kwargs["creationflags"] = (resources.subprocess_flags()
+                                   | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    proc = subprocess.Popen(cmd, **kwargs)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        return proc.returncode, out, err
+    except subprocess.TimeoutExpired:
+        try:
+            if os.name == "posix":
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            else:
+                proc.kill()
+        except OSError:
+            pass
+        try:
+            proc.communicate(timeout=3)     # 收尾：最多再等 3s，读不到也直接放弃
+        except Exception:
+            pass
+        raise
+
+
+def _parse_targets(out: str) -> List[str]:
+    """从 `hdc list targets` 输出里取序列号（首列，排除 [Empty] 与混入的 W/E 日志行）。"""
+    serials = []
+    for line in out.splitlines():
+        s = re.sub(r"\x1b\[[0-9;]*m", "", line).strip().split("\t")[0].strip()
+        # 序列号不含空格；排除 [Empty] 与混入 stdout 的 W/E 日志行
+        if s and " " not in s and s != "[Empty]":
+            serials.append(s)
+    return serials
+
+
 class Hdc:
     def __init__(self, hdc_path: Optional[str] = None, serial: Optional[str] = None):
         self.hdc_path = hdc_path or resources.find_hdc()
@@ -50,16 +97,15 @@ class Hdc:
             cmd += ["-t", self.serial]
         cmd += list(args)
         try:
-            proc = subprocess.run(cmd, capture_output=True, timeout=timeout,
-                                  creationflags=resources.subprocess_flags())
+            rc, out, err = _spawn(cmd, timeout)
         except FileNotFoundError:
             raise HdcError(f"找不到 hdc（{self.hdc_path}），请用 --hdc-path 指定") from None
         except subprocess.TimeoutExpired:
-            raise HdcError(f"hdc 命令超时: {' '.join(cmd)}") from None
-        if proc.returncode != 0:
-            err = proc.stderr.decode("utf-8", "replace").strip()
-            raise HdcError(f"hdc 失败({proc.returncode}): {' '.join(cmd)}\n{err}")
-        return proc.stdout
+            raise HdcError(f"hdc 无响应（{timeout:.0f}s 超时）：{' '.join(cmd)}") from None
+        if rc != 0:
+            raise HdcError(f"hdc 失败({rc}): {' '.join(cmd)}\n"
+                           f"{err.decode('utf-8', 'replace').strip()}")
+        return out
 
     def shell(self, *args: str, timeout: float = 30.0) -> str:
         raw = self._run("shell", *args, timeout=timeout).decode("utf-8", "replace")
@@ -80,23 +126,41 @@ class Hdc:
 
     # ---- 设备 ----
     @staticmethod
-    def list_devices(hdc_path: Optional[str] = None) -> List[str]:
+    def list_devices(hdc_path: Optional[str] = None, timeout: float = 20.0,
+                     retries: int = 1,
+                     on_progress: Optional[Callable[[str], None]] = None) -> List[str]:
+        """扫描设备。**任何异常都转成 HdcError**，绝不把异常抛给调用方线程。
+
+        扫描是 UI 的入口动作，抛出的未捕获异常会直接打死扫描线程，界面就永久停在
+        「正在扫描设备… / 扫描中…」（用户看到的就是「一直 loading、点不动」）。
+        首次 `list targets` 往往还要拉起 hdc server，比后续调用慢得多，故超时重试一次。
+        """
         hdc_path = hdc_path or resources.find_hdc()
         if not hdc_path:
             raise HdcError("找不到 hdc，请确认程序资源完整或安装 DevEco Command Line Tools")
-        try:
-            proc = subprocess.run([hdc_path, "list", "targets"], capture_output=True, timeout=10,
-                                  creationflags=resources.subprocess_flags())
-        except FileNotFoundError:
-            raise HdcError(f"找不到 hdc（{hdc_path}）") from None
-        out = proc.stdout.decode("utf-8", "replace")
-        serials = []
-        for line in out.splitlines():
-            s = re.sub(r"\x1b\[[0-9;]*m", "", line).strip().split("\t")[0].strip()
-            # 序列号不含空格；排除 [Empty] 与混入 stdout 的 W/E 日志行
-            if s and " " not in s and s != "[Empty]":
-                serials.append(s)
-        return serials
+        last = ""
+        for attempt in range(retries + 1):
+            try:
+                rc, out, err = _spawn([hdc_path, "list", "targets"], timeout)
+            except FileNotFoundError:
+                raise HdcError(f"找不到 hdc（{hdc_path}）") from None
+            except subprocess.TimeoutExpired:
+                last = (f"hdc 无响应（list targets {timeout:.0f}s 超时）。"
+                        "常见原因：设备刚插拔或刚重新授权、hdc server 正在重启、"
+                        "或另一个版本的 hdc 占着服务端口。请稍后点「⟳ 刷新」重试；"
+                        "仍不行就在终端执行 `hdc kill && hdc start`（或重新插拔 USB）")
+                logging.warning("list targets 超时（第 %d/%d 次，%.0fs）",
+                                attempt + 1, retries + 1, timeout)
+                if on_progress and attempt < retries:
+                    on_progress(f"hdc 无响应（{timeout:.0f}s 超时），正在重试…")
+                continue
+            out_s = out.decode("utf-8", "replace")
+            serials = _parse_targets(out_s)
+            if not serials and rc != 0:
+                raise HdcError(f"hdc list targets 失败({rc})："
+                               f"{err.decode('utf-8', 'replace').strip()[:200]}")
+            return serials
+        raise HdcError(last)
 
     def device_type(self) -> str:
         # NEXT 用 param get；老版本是 getparam

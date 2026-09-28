@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -39,6 +40,7 @@ def _candidate_roots():
     - _MEIPASS（Windows/Linux onedir 根、macOS Frameworks）
     - macOS .app: ../Frameworks（binaries=）与 ../Resources（datas=）
     - 可执行文件同目录（onedir 兜底）
+    - 开发态仓库根：vendor/bin、vendor/data、仓库根（构建前素材位置）
     """
     roots = []
     meipass = getattr(sys, "_MEIPASS", None)
@@ -47,6 +49,9 @@ def _candidate_roots():
     exe_dir = Path(sys.executable).resolve().parent
     if is_frozen():
         roots += [exe_dir.parent / "Frameworks", exe_dir.parent / "Resources", exe_dir]
+    else:
+        root = resource_root()
+        roots += [root / "vendor", root]
     return [r for r in roots if r.is_dir()]
 
 
@@ -89,7 +94,7 @@ def _host_hdc_candidates() -> list:
 
 def find_hdc() -> str:
     """hdc 查找链：程序内置 → 本机 SDK（新→旧）→ PATH。返回空串表示找不到。"""
-    bundled = resource_path("bin" / Path(_platform_bin("hdc")))
+    bundled = resource_path(os.path.join("bin", _platform_bin("hdc")))
     if bundled.is_file():
         return str(bundled)
     for cand in _host_hdc_candidates():
@@ -100,7 +105,7 @@ def find_hdc() -> str:
 
 def find_ffmpeg() -> str:
     """ffmpeg 查找链：程序内置 → PATH。"""
-    bundled = resource_path("bin" / Path(_platform_bin("ffmpeg")))
+    bundled = resource_path(os.path.join("bin", _platform_bin("ffmpeg")))
     if bundled.is_file():
         return str(bundled)
     return shutil.which("ffmpeg") or ""
@@ -123,13 +128,36 @@ def log_file() -> Path:
 
 
 def setup_logging() -> str:
-    path = log_file()
-    handler = RotatingFileHandler(path, maxBytes=512 * 1024, backupCount=2, encoding="utf-8")
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    """挂日志文件；**写不了日志也绝不能让程序起不来**。
+
+    只读 home、磁盘满、企业策略、沙箱等都可能让 `~/Library/Logs` 不可写——原实现
+    直接抛 PermissionError，整个应用启动即崩。改为逐级降级：
+    首选路径 → 系统临时目录 → 仅 stderr。返回实际用的路径（stderr 时为空串）。
+    """
     root = logging.getLogger()
     root.setLevel(logging.INFO)
-    root.addHandler(handler)
-    return str(path)
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+
+    candidates = []
+    try:
+        candidates.append(log_file())
+    except OSError:
+        pass                       # 连目录都建不出来，走后面的兜底
+    candidates.append(Path(tempfile.gettempdir()) / "wscrcpy.log")
+
+    for path in candidates:
+        try:
+            handler = RotatingFileHandler(path, maxBytes=512 * 1024, backupCount=2,
+                                          encoding="utf-8")
+        except OSError:
+            continue
+        handler.setFormatter(fmt)
+        root.addHandler(handler)
+        return str(path)
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.getLogger(__name__).warning("无可用日志文件路径，日志仅输出到 stderr")
+    return ""
 
 
 def default_save_dir() -> Path:
@@ -145,7 +173,7 @@ def default_save_dir() -> Path:
 
 def find_caploop_script() -> str:
     """caploop.sh：打包内置 → 仓库 scripts/。"""
-    p = resource_path("data" / "caploop.sh")
+    p = resource_path(os.path.join("data", "caploop.sh"))
     if p.is_file():
         return str(p)
     p = resource_root() / "scripts" / "caploop.sh"

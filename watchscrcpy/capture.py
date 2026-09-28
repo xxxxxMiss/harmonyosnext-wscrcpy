@@ -9,7 +9,9 @@
 from __future__ import annotations
 
 import io
+import struct
 import os
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -20,6 +22,20 @@ from PIL import Image, ImageFile
 from .hdc import Hdc, HdcError, TMP_DIR
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True  # 轮询窗口内可能拉到半截 JPEG，能解就解
+
+
+def parse_jpeg_size(data: bytes) -> Optional[tuple]:
+    """从 JPEG 字节里读 SOF 尺寸（不整帧解码）；失败返回 None。"""
+    i = data.find(b"\xff\xc0")
+    if i < 0:
+        for marker in (b"\xff\xc2", b"\xff\xc1"):      # 渐进 / 扩展顺序
+            i = data.find(marker)
+            if i >= 0:
+                break
+    if i < 0 or len(data) < i + 9:
+        return None
+    h, w = struct.unpack(">HH", data[i + 5:i + 9])
+    return (w, h) if w and h else None
 
 
 @dataclass
@@ -151,7 +167,9 @@ class LoopCapture(BaseCapture):
             # 环形缓冲 40 帧，一次落后超过缓冲即放弃中间帧
             for n in range(max(self.last_seq + 1, cur - 39), cur + 1):
                 remote = f"{self.remote_dir}/f{n % 40:06d}.jpeg"
-                local = os.path.join("/tmp", "wscrcpy_loop.jpeg")
+                # 落盘路径必须与平台无关：`/tmp` 在 Windows 上是「当前盘根下的 \tmp」，
+                # 多半不存在直接失败（LoopCapture 目前没接到 GUI 上，但不能留这种坑）。
+                local = os.path.join(tempfile.gettempdir(), "wscrcpy_loop.jpeg")
                 try:
                     self.hdc.recv(remote, local, timeout=15)
                     with open(local, "rb") as f:

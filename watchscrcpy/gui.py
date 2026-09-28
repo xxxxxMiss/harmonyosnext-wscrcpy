@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import math
 import os
 import threading
 import time
@@ -20,7 +21,8 @@ from PySide6.QtWidgets import (QApplication, QFileDialog, QFrame, QHBoxLayout, Q
                                QPushButton, QSizePolicy, QVBoxLayout, QWidget)
 
 from . import resources
-from .capture import BaseCapture, Frame, LoopCapture, PulledCapture
+from .agent import AgentCapture, capture_supported as agent_supported
+from .capture import BaseCapture, Frame, PulledCapture
 from .hdc import HOST_TEMP, TMP_DIR, Hdc, HdcError
 from .recorder import Recorder
 from .scrcpy_server import H264Stream, find_local_so
@@ -86,6 +88,7 @@ class FrameBridge(QWidget):
     status_changed = Signal(str, bool)      # (文本, 是否错误)
     scan_done = Signal(object)              # 扫描结果 payload dict
     lost = Signal()                         # 设备失联
+    quality_restart = Signal()              # 画质档切换：旧采集已收干净，请按新档重启
 
 
 class TitleBar(QFrame):
@@ -142,11 +145,19 @@ class VideoPanel(QWidget):
         self._ph_sub = "请连接设备后点击「⟳ 刷新」"
 
     def set_frame(self, qimg: QImage):
-        pm = QPixmap.fromImage(qimg)
         box = self.rect().adjusted(26, 26, -26, -26)
-        self._pixmap = pm.scaled(box.width(), box.height(),
-                                 Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        w, h = self._pixmap.width(), self._pixmap.height()
+        # ⚠ 高清屏（Retina）上必须**按物理像素**缩放，再把 devicePixelRatio 设回去。
+        # 老写法按逻辑像素缩放（Pixmap dpr=1），Qt 绘制时又要把它放大 2 倍填满 2x 背板
+        # ——两次重采样，本来就只有 462px 的源图会被二次糊化。现在只采样一次。
+        dpr = float(self.devicePixelRatioF() or 1.0)
+        pw = max(1, int(round(box.width() * dpr)))
+        ph = max(1, int(round(box.height() * dpr)))
+        pm = QPixmap.fromImage(qimg).scaled(pw, ph,
+                                            Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        pm.setDevicePixelRatio(dpr)
+        self._pixmap = pm
+        sz = pm.deviceIndependentSize()          # 逻辑尺寸（= 物理 / dpr）
+        w, h = sz.width(), sz.height()
         self._video_rect = QRectF((self.width() - w) / 2, (self.height() - h) / 2, w, h)
         self.update()
 
@@ -194,10 +205,14 @@ class MirrorWindow(QWidget):
     投屏中设备失联自动回到未连接态。
     """
 
-    def __init__(self, interval: float = 0.35, round_mode: str = "auto", mode: str = "pull",
+    # agent 推流画质档位：(标签, scale)。手表 466×466 圆屏，0.99 → 462×462 近原生。
+    QUALITY_PRESETS = (("原生", 0.99), ("清晰", 0.8), ("流畅", 0.5))
+
+    def __init__(self, interval: float = 0.35, round_mode: str = "auto", mode: str = "auto",
                  serial: Optional[str] = None, hdc_path: Optional[str] = None,
                  wakeup: bool = True, auto_record: Optional[str] = None,
-                 test_record_path: Optional[str] = None, test_shot_path: Optional[str] = None):
+                 test_record_path: Optional[str] = None, test_shot_path: Optional[str] = None,
+                 agent_scale: float = 0.99, agent_so: Optional[str] = None):
         super().__init__(objectName="root")
         self.setWindowTitle("WSCRCPY")
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
@@ -221,8 +236,16 @@ class MirrorWindow(QWidget):
         self.stream: Optional[H264Stream] = None
         self.decoder: Optional[H264Decoder] = None
         self.stream_rec: Optional[StreamRecorder] = None
-        self.mode = mode if mode != "loop" else "pull"   # loop(设备端截图连拍)并入 pull
-        self.effective_mode = self.mode            # stream 失败时回落为 pull
+        # loop(设备端截图连拍)已并入 pull；agent 单列（见 _mode_chain）
+        self.mode = "pull" if mode == "loop" else mode
+        self._dtype = ""                           # 连接后填入，供 _mode_chain 判断 wearable
+        self._agent_probe = None                   # 扫描线程探好的 (可用, 说明)
+        self.agent_scale = agent_scale
+        self.agent_so = agent_so
+        self._src_size: Optional[tuple] = None     # 最近一帧的实际像素尺寸（HUD 显示用）
+        self._quality_switching = False            # 画质档切换中：期间忽略重复点击
+        self._watchdog = None                      # 启动兜底定时器（只建一次，见 _arm_bringup_watchdog）
+        self.effective_mode = self.mode            # 回落链实际命中的那一档
         self.recorder: Optional[Recorder] = None
         self.rec_t0: Optional[float] = None
         self._last_image: Optional[QImage] = None
@@ -234,6 +257,7 @@ class MirrorWindow(QWidget):
         self.bridge.status_changed.connect(self._on_status)
         self.bridge.scan_done.connect(self._on_scan)
         self.bridge.lost.connect(lambda: self._enter_disconnected("设备连接已断开，请重新连接后点「⟳ 刷新」"))
+        self.bridge.quality_restart.connect(self._restart_capture)
 
         self._build_ui()
         self._bind_keys()
@@ -274,6 +298,13 @@ class MirrorWindow(QWidget):
         self.btn_refresh.setCursor(Qt.PointingHandCursor)
         self.btn_refresh.clicked.connect(self.refresh)
         btn_wrap.addWidget(self.btn_refresh)
+        # 画质档位：只影响 agent 推流分辨率（pull 本来就是原生截图）
+        self.btn_quality = QPushButton()
+        self.btn_quality.setProperty("neon", True)
+        self.btn_quality.setCursor(Qt.PointingHandCursor)
+        self.btn_quality.clicked.connect(self.cycle_quality)
+        btn_wrap.addWidget(self.btn_quality)
+        self._sync_quality_btn()
         btn_wrap.addStretch(1)
         self.btn_rec = QPushButton("● 录制")
         self.btn_shot = QPushButton("⧉ 截屏")
@@ -307,6 +338,75 @@ class MirrorWindow(QWidget):
         self.btn_rec.setEnabled(connected)
         self.btn_shot.setEnabled(connected)
         self.btn_refresh.setVisible(not connected)
+        self.btn_quality.setVisible(connected)
+
+    # ---------- 画质档位 ----------
+    def _quality_index(self) -> int:
+        """当前 scale 命中的档位下标；无精确匹配时取最接近的一档。"""
+        best, dist = 0, None
+        for i, (_, s) in enumerate(self.QUALITY_PRESETS):
+            d = abs(s - self.agent_scale)
+            if d < 1e-9:
+                return i
+            if dist is None or d < dist:
+                best, dist = i, d
+        return best
+
+    def _sync_quality_btn(self):
+        i = self._quality_index()
+        label, scale = self.QUALITY_PRESETS[i]
+        if abs(scale - self.agent_scale) > 1e-9:
+            label = f"自定义 {self.agent_scale:g}"
+        self.btn_quality.setText(f"◐ 画质 {label}")
+        self.btn_quality.setToolTip(
+            "agent 推流分辨率档位（点击切换，切换即重启采集）：\n"
+            # 尺寸按设备端的 ceil(分辨率*scale) 算，和真机实测一致（0.99→462、0.8→373、0.5→233）
+            + "\n".join(f"  {lb}  scale {sc}  ≈ {math.ceil(466 * sc)}×{math.ceil(466 * sc)}"
+                        for lb, sc in self.QUALITY_PRESETS)
+            + f"\n当前：scale {self.agent_scale:g}")
+
+    def cycle_quality(self):
+        """切换 agent 推流分辨率；正在 agent 推流时立即按新档重启采集。"""
+        if self._quality_switching:
+            self._on_status("画质正在切换中，请稍候…", err=False)
+            return
+        i = self._quality_index()
+        _, scale = self.QUALITY_PRESETS[(i + 1) % len(self.QUALITY_PRESETS)]
+        self.agent_scale = scale
+        self._sync_quality_btn()
+        text = self.btn_quality.text().strip()
+        if self.hdc is None:
+            return
+        if self.effective_mode != "agent":
+            self._on_status("画质档位只对 agent 推流生效"
+                            "（当前是 pull 逐帧截图，本身就是原生分辨率）", err=False)
+            return
+        logging.info("切换画质: scale=%.2f，重启 agent 采集", scale)
+        self._on_status(f"{text}，正在按新档重启采集…", err=False)
+        # 置灰 + 置位：切换完成前不接受第二次点击（否则两个重启流程会互相踩）
+        self.btn_quality.setEnabled(False)
+        self._quality_switching = True
+
+        def work():
+            # 收旧采集必须在**工作线程**里等它彻底死掉：AgentCapture 收尾会
+            # `pkill uitest.*start-daemon`，若旧线程还活着就起了新的，旧线程的 pkill
+            # 会把新 daemon 一起杀掉（实测现象：切完画质 2 秒后「设备连接已断开」）。
+            self._teardown_capture(wait=20.0)
+            self.bridge.quality_restart.emit()
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _restart_capture(self):
+        """UI 线程槽：旧采集已收干净，按新画质档重启（采集本身在各自线程里跑）。"""
+        if self.hdc is None:
+            self._quality_switching = False
+            return
+        self.frames_rendered = 0
+        self._src_size = None
+        self._t0 = time.monotonic()
+        self._start_capture()
+        self._arm_bringup_watchdog()
+        self._quality_switching = False
 
     def refresh(self):
         """扫描设备：找到即自动连接进入投屏；否则停留在未连接态提示。"""
@@ -318,14 +418,16 @@ class MirrorWindow(QWidget):
         self.status.setText("正在扫描设备…")
 
         def work():
-            payload = {"serials": [], "hdc": None, "err": ""}
+            payload = {"serials": [], "hdc": None, "err": "", "dtype": "", "agent": None}
             try:
                 hdc_path = self._hdc_path or resources.find_hdc()
                 if not hdc_path:
                     payload["err"] = ("找不到 hdc：程序内置资源缺失，且 PATH 中也没有 hdc。"
                                       "请安装 DevEco Command Line Tools 后重试")
                 else:
-                    serials = Hdc.list_devices(hdc_path)
+                    serials = Hdc.list_devices(
+                        hdc_path,
+                        on_progress=lambda m: self.bridge.status_changed.emit(m, False))
                     if self._desired_serial:
                         serials = [s for s in serials if s == self._desired_serial]
                         if not serials:
@@ -337,10 +439,24 @@ class MirrorWindow(QWidget):
                                 h.wakeup()
                             except HdcError:
                                 pass
+                        # dtype 与 agent 可用性一并在这里探好：它们都是 hdc 调用
+                        # （device_type 2 次 shell、agent_probe 2 次 shell，合计最坏
+                        # 几十秒），放到 UI 线程会把窗口冻成「一直 loading」。
+                        try:
+                            payload["dtype"] = h.device_type()
+                        except HdcError:
+                            pass
+                        payload["agent"] = agent_supported(h, self.agent_so)
                         payload["serials"], payload["hdc"] = serials, h
             except HdcError as e:
                 payload["err"] = str(e)
-            self.bridge.scan_done.emit(payload)
+            except Exception as e:          # 兜底：扫描线程绝不能静默死掉
+                payload["err"] = f"扫描异常：{type(e).__name__}: {e}"
+                logging.exception("扫描设备失败")
+            finally:
+                # 无论成败都必须回报：漏掉 emit 会让 _scanning 永远为 True，
+                # 界面就永久停在「正在扫描设备… / 扫描中…」且按钮点不动。
+                self.bridge.scan_done.emit(payload)
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -351,69 +467,170 @@ class MirrorWindow(QWidget):
         if payload["hdc"] is None:
             self._enter_disconnected(payload["err"] or "未发现设备")
         else:
-            self._enter_connected(payload["hdc"], payload["serials"])
+            self._agent_probe = payload.get("agent")
+            self._enter_connected(payload["hdc"], payload["serials"],
+                                  payload.get("dtype", ""))
 
-    def _enter_connected(self, hdc: Hdc, serials: list):
+    def _teardown_capture(self, wait: float = 3.0):
+        """收掉当前帧采集线程 + stream 档残留。
+
+        重连/重试前必须先收：否则旧 cap 还活着，新 cap 会和它抢同一个 fport/端口，
+        表现成「刚连上就报设备连接已断开」。
+
+        `wait` 是等采集线程真正退出的秒数。**必须等干净**：AgentCapture 收尾时会
+        `pkill uitest.*start-daemon` 并删掉设备上的 agent.so，若旧线程还活着就起了新的，
+        旧线程的 pkill 会把**新 daemon** 一起杀掉（现象：切完画质 2 秒后「连接已断开」）。
+        调用方若紧接着要起新采集，就传足够大的 wait，别用默认值。
+        """
+        if self.cap:
+            cap, self.cap = self.cap, None
+            cap.stop()
+            try:
+                cap.join(timeout=wait)
+            except Exception:
+                logging.debug("采集线程 join 失败（忽略）", exc_info=True)
+            if cap.is_alive():
+                logging.warning("采集线程 %.1fs 内未退出（其收尾可能误杀新 daemon）", wait)
+        self._teardown_stream()
+
+    def _enter_connected(self, hdc: Hdc, serials: list, dtype: str = ""):
+        self._teardown_capture()          # 重复连接前先收旧的（见方法注释）
         self.hdc = hdc
         self._last_hdc = hdc
-        dtype = ""
-        try:
-            dtype = hdc.device_type()
-        except HdcError:
-            pass
+        self._dtype = dtype
         self.round = (self.round_mode == "on") or \
                      (self.round_mode == "auto" and "wearable" in dtype)
         self.title.set_subtitle(f"{dtype or 'DEVICE'} · {hdc.serial}")
         note = f"（共 {len(serials)} 台，已连第一台）" if len(serials) > 1 else ""
         self.frames_rendered = 0
+        self._src_size = None
         self._t0 = time.monotonic()
         self._set_connected_ui(True)
-        self._start_capture()
-        self.status.setText(f"已连接 {hdc.serial}{note}，正在拉取画面…")
+        # 先落日志再启采集：_start_capture 里若卡在某个 hdc 调用上，日志里至少
+        # 留下「已连上谁、什么类型」，否则只剩上一行，无法判断卡在哪一步。
         logging.info("connected: %s dtype=%s", hdc.serial, dtype)
+        self._on_status(f"已连接 {hdc.serial}{note}，正在启动采集…", err=False)
+        self._start_capture()
+        self._arm_bringup_watchdog()
         if self._auto_record:
             path = self._auto_record
             self._auto_record = None
             self.test_record_path = path
             self.toggle_record()
 
+    def _arm_bringup_watchdog(self):
+        """启动兜底：迟迟不出画面时把「⟳ 刷新」放回来，别让界面永久无法恢复。
+
+        连接成功后刷新按钮是被隐藏的（投屏态）；万一采集在某个 hdc 调用上卡住，
+        用户就会看到「一直 loading」且无按钮可点，只能强杀进程。这里给一条退路。
+
+        定时器**只建一次**（重复 arm 只是重置计时）：早先每次新建一个 QTimer(self)，
+        旧定时器被 parent 持有不会销毁，切画质/重连几次就会攒下一串旧定时器，
+        它们会在新采集刚启动、还没出首帧时跳出「启动超时」的假警报。
+        """
+        def check():
+            if self.hdc is None or self.frames_rendered > 0:
+                return
+            self.btn_refresh.setVisible(True)
+            self.btn_refresh.setEnabled(True)
+            self._on_status("启动超时仍未收到画面：可点「⟳ 刷新」重试"
+                            "（或检查设备授权 / USB 连接）", err=True)
+        if self._watchdog is None:
+            t = QTimer(self)
+            t.setSingleShot(True)
+            t.timeout.connect(check)
+            self._watchdog = t
+        self._watchdog.start(45000)
+
     def _enter_disconnected(self, msg: str):
         if self.stream_rec and self.stream_rec.recording:
             kind, text = self.stream_rec.stop()    # 掉线先保住已录流
             if kind == "done":
                 self._on_status(f"掉线前录制已保存 {text}", err=False)
-        if self.decoder:
-            self.decoder.stop()
-            self.decoder = None
-        if self.stream:
-            self.stream.stop()
-            self.stream = None
         if self.recorder and self.recorder.recording:
             self._stop_record()                    # 掉线先保住已录帧
-        if self.cap:
-            self.cap.stop()
-            self.cap = None
+        self._teardown_capture()
+        if self._watchdog is not None:
+            self._watchdog.stop()                  # 已掉线就别再报「启动超时」
         self.hdc = None
         self._set_connected_ui(False)
         self.panel.clear_frame("未发现设备", "请连接设备后点击「⟳ 刷新」开始投屏")
         self._last_image = None
+        self._src_size = None
         self.title.set_subtitle("未连接")
         self._on_status(msg, err=True)
 
+    # 采集回落链：auto 走满三档；显式指定则只在其后追加更保守的档
+    _MODE_CHAINS = {
+        "auto":   ["stream", "agent", "pull"],
+        "stream": ["stream", "agent", "pull"],
+        "agent":  ["agent", "pull"],
+        "pull":   ["pull"],
+    }
+
+    def _mode_chain(self):
+        chain = list(self._MODE_CHAINS.get(self.mode, ["pull"]))
+        # 手表虚拟屏不产出帧（PLAN 11.2），stream 档必然失败且要耗 10~15s 才超时：
+        # 直接跳过，省启动时间，也避免留下半死的 H264Stream（其收尾会 pkill uitest daemon）
+        if "stream" in chain and "wearable" in self._dtype:
+            chain.remove("stream")
+            logging.info("wearable 设备跳过 stream 档（虚拟屏零帧）")
+        return chain
+
     def _start_capture(self):
-        """按模式起采集：stream（H.264 流，37fps）优先，失败自动回落 pull（截图 1-2fps）。"""
-        if self.effective_mode == "stream":
+        """按回落链起采集，逐档降级，最后一档是 pull（截图 0.6-1.6fps）。
+
+        stream: H.264 视频流（手机 30fps+）；agent: 设备端变化触发 JPEG 推流
+        （手表实测 ~30fps，但画面静止时不推帧）；pull: PC 逐帧截图（最稳、最慢）。
+        """
+        chain = self._mode_chain()
+        errors = []
+        for m in chain:
             try:
-                self._start_stream()
-                return
-            except Exception as e:          # 含 HdcError / grpc / av 异常
-                logging.warning("stream 模式启动失败，回落 pull: %s", e)
-                self._on_status(f"流畅模式不可用（{str(e)[:60]}），已回落截图模式", err=True)
-                self.effective_mode = "pull"
-        cls = LoopCapture if self.mode == "loop" else PulledCapture
-        self.cap = cls(self.hdc, self.interval, self._worker_frame,
-                       on_status=lambda m: self.bridge.status_changed.emit(m, True),
-                       on_lost=self.bridge.lost.emit)
+                if m == "stream":
+                    self._start_stream()
+                elif m == "agent":
+                    self._start_agent()
+                else:
+                    self._start_pull()
+            except Exception as e:              # 含 HdcError / grpc / av / OSError
+                errors.append(f"{m}: {str(e)[:70]}")
+                logging.warning("%s 模式启动失败，尝试下一档: %s", m, e)
+                # 关键：失败的 stream 尝试会留下 H264Stream/H264Decoder，其 stop() 会
+                # pkill uitest daemon —— 留着它会在关窗时把 agent 档正在用的 daemon 杀掉。
+                self._teardown_stream()
+                continue
+            self.effective_mode = m
+            self.btn_quality.setEnabled(m == "agent")   # pull 已是原生分辨率，无需档位
+            if errors:
+                self._on_status(f"已降级为 {m} 模式（{'；'.join(errors)}）", err=True)
+            elif m == "agent":
+                self._on_status("agent 推流中（画面变化时推送）", err=False)
+            return
+        self.btn_quality.setEnabled(False)
+        self._on_status("所有采集模式均不可用：" + "；".join(errors), err=True)
+        self.bridge.lost.emit()
+
+    def _start_agent(self):
+        # 扫描线程已探过一次（agent_supported 含 2 次 hdc shell），这里直接用结果，
+        # 避免在 UI 线程再等一遍 hdc；只有探针缺失（异常路径）才现探。
+        probe = self._agent_probe
+        ok, why = probe if probe else agent_supported(self.hdc, self.agent_so)
+        logging.info("agent 通道探针: ok=%s %s", ok, why)
+        if not ok:
+            raise HdcError(why)
+        cap = AgentCapture(self.hdc, self.interval, self._worker_frame,
+                           scale=self.agent_scale, so_path=self.agent_so,
+                           on_status=lambda m: self.bridge.status_changed.emit(m, True),
+                           on_lost=self.bridge.lost.emit)
+        cap.start()
+        self.cap = cap
+        logging.info("agent 模式: %s", why)
+
+    def _start_pull(self):
+        self.cap = PulledCapture(self.hdc, self.interval, self._worker_frame,
+                                 on_status=lambda m: self.bridge.status_changed.emit(m, True),
+                                 on_lost=self.bridge.lost.emit)
         self.cap.start()
 
     def _start_stream(self):
@@ -437,20 +654,35 @@ class MirrorWindow(QWidget):
         if rec and rec.recording:
             rec.write(flags, data, pts)
 
-    def stop(self):
+    def _teardown_stream(self):
+        """收掉 stream 档留下的一切。
+
+        ⚠ 必须在回落到 agent 档时立刻调用：`H264Stream._teardown()` 会
+        `pkill -9 -f 'uitest.*start-daemon'`，而 agent 档用的正是同一个 singleness
+        daemon —— 留着半死的 H264Stream，关窗时 `stop()` 会把 agent 的 daemon 一起杀掉，
+        表现成「刚关闭就报设备连接已断开」。
+        """
         if self.decoder:
             self.decoder.stop()
             self.decoder = None
         if self.stream:
-            self.stream.stop()
+            try:
+                self.stream.stop()
+            except Exception:
+                logging.warning("stream 收尾失败（忽略）", exc_info=True)
             self.stream = None
+
+    def stop(self):
+        # 先停帧采集（agent/pull 的线程），再收 stream —— 反过来 stream 的收尾会
+        # pkill 掉 agent 正在用的 uitest daemon，让采集线程误报「连接已断开」。
+        if self.cap:
+            self.cap.stop()
+            self.cap.join(timeout=3)
+        self._teardown_stream()
         if self.stream_rec and self.stream_rec.recording:
             kind, text = self.stream_rec.stop()
             if kind == "saved_frames":
                 self._on_status(text, err=True)
-        if self.cap:
-            self.cap.stop()
-            self.cap.join(timeout=3)
         rec = self.recorder
         if rec and rec.recording:
             kind, _ = rec.stop()
@@ -463,6 +695,10 @@ class MirrorWindow(QWidget):
         if rec and rec.recording:
             rec.write(frame)
         im = frame.image
+        if im is not None:
+            # 记录**采集侧真实像素尺寸**：它是画面清晰度的上限（HUD 显示），
+            # 也让「显示发糊」能一眼区分是源分辨率低还是窗口放大所致。
+            self._src_size = im.size
         if im is not None and self.round:
             im = _round_mask(im)
         qimg = _pil_to_qimage(im) if im is not None else QImage()
@@ -482,7 +718,7 @@ class MirrorWindow(QWidget):
             note = f"✗ {err[:80]}"
         self.status.setText(f"实时画面正常{note}" if not err else note)
 
-    def _on_status(self, text, err):
+    def _on_status(self, text, err=False):
         self.status.setText(text)
         if err:
             logging.warning("status: %s", text)
@@ -493,8 +729,9 @@ class MirrorWindow(QWidget):
         fps = (self.frames_rendered / (time.monotonic() - self._t0)) if self.frames_rendered else 0
         el = int(time.monotonic() - self._t0)
         rec = f"   ● REC {int(time.monotonic() - self.rec_t0)}s" if self.rec_t0 else ""
+        src = f"   {self._src_size[0]}×{self._src_size[1]}" if self._src_size else ""
         self.hud.setText(f"DEV {self.hdc.serial}   FPS {fps:.1f}   FRM {self.frames_rendered:04d}"
-                         f"   T+{el // 60:02d}:{el % 60:02d}{rec}")
+                         f"{src}   T+{el // 60:02d}:{el % 60:02d}{rec}")
 
     def _tick_rec_time(self):
         if self.rec_t0:

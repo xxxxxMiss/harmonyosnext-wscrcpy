@@ -1,0 +1,17 @@
+# 换行符策略：Windows 上 core.autocrlf=true（安装默认）会把提交的脚本转成 CRLF。
+# scripts/caploop.sh 是要推到设备上用 `sh` 执行的，命令里带上 \r 会直接失败。
+*.sh   text eol=lf
+*.ps1  text eol=crlf
+*.py   text eol=lf
+
+# 二进制资源（换行/编码转换一律不参与），含随仓库提交的 hdc/ffmpeg/dll/so
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.mp4    binary
+*.dmg    binary
+*.zip    binary
+*.exe    binary
+*.dll    binary
+*.so     binary
+*.dylib  binary

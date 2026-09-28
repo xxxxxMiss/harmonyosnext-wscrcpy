@@ -39,11 +39,16 @@ $hdcDstPath = Join-Path (Resolve-Path "vendor\bin").Path "hdc.exe"
 if ($hdcSrcPath -ne $hdcDstPath) {
     Copy-Item -Force $HdcBin $hdcDstPath
 }
-# hdc.exe 如带伴随 DLL 一并复制（Windows DLL 搜索含 exe 所在目录）
+# hdc.exe 如带伴随 DLL 一并复制（Windows DLL 搜索含 exe 所在目录）。
+# libexternal_hdc.dll 刻意不带：它会把 hdc 切到旧版 external server 并抢 5037 端口。
+# 先删残留再拷 —— 只"跳过拷贝"不够：vendor\bin 里若留着上次构建/手工拷入的旧
+# libexternal_hdc.dll，hdc.exe 仍会去加载它，dev 态每次调用都刷一屏加载失败日志。
+Remove-Item -Force -ErrorAction SilentlyContinue "vendor\bin\libexternal_hdc.dll"
 $tcDir = (Resolve-Path (Split-Path $HdcBin -Parent)).Path
 $vendorBin = (Resolve-Path "vendor\bin").Path
 if ($tcDir -ne $vendorBin) {
     Get-ChildItem -Path $tcDir -Filter *.dll -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -ne "libexternal_hdc.dll" } |
         ForEach-Object { Copy-Item -Force $_.FullName vendor\bin\ }
 }
 

@@ -6,6 +6,8 @@ ffmpeg 优先用程序内置资源，缺失时保留帧目录并给出提示。
 """
 from __future__ import annotations
 
+import io
+import logging
 import os
 import shutil
 import subprocess
@@ -14,7 +16,7 @@ import time
 from typing import Callable, List, Optional, Tuple
 
 from . import resources
-from .capture import Frame
+from .capture import Frame, parse_jpeg_size
 
 
 class Recorder:
@@ -30,6 +32,8 @@ class Recorder:
         self._frames: List[Tuple[str, float]] = []   # (文件名, 起始秒)
         self._n = 0
         self._start: Optional[float] = None
+        self._size: Optional[Tuple[int, int]] = None    # 首帧尺寸（统一基准）
+        self._size_fixed: Optional[Tuple[int, int]] = None   # 已提示过的异常尺寸（避免刷屏）
 
     @property
     def recording(self) -> bool:
@@ -39,17 +43,53 @@ class Recorder:
         os.makedirs(self.frames_dir, exist_ok=True)
         self._n = 0
         self._frames.clear()
+        self._size = None
+        self._size_fixed = None
         self._start = time.monotonic()
 
     def write(self, frame: Frame) -> None:
         """每帧调用；空帧（采集失败）不落盘，时长由下一帧的 t 自然补齐。"""
         if not self.recording or frame.jpeg is None:
             return
+        data = self._normalize(frame.jpeg)
         name = f"f{self._n:06d}.jpeg"
         with open(os.path.join(self.frames_dir, name), "wb") as f:
-            f.write(frame.jpeg)
+            f.write(data)
         self._frames.append((name, frame.t))
         self._n += 1
+
+    def _normalize(self, data: bytes) -> bytes:
+        """把尺寸不一致的帧缩放到**首帧尺寸**。
+
+        `ffconcat` 要求所有帧尺寸一致，一旦混进一张不同尺寸的（首帧兜底图、切换采集档、
+        设备端四舍五入差异……），ffmpeg 会报 "Input link parameters do not match" 直接失败。
+        这里以首帧为基准就地纠正，宁多花几毫秒也不让整段录制作废。
+        尺寸用 SOF 头读，不做整帧解码；只有真的不一致才解码+缩放。
+        """
+        size = parse_jpeg_size(data)
+        if not size:                      # 读不出尺寸（半截文件等）：原样落盘，交给解码端容错
+            return data
+        if self._size is None:
+            self._size = size
+            return data
+        if size == self._size:
+            return data
+        try:
+            from PIL import Image
+            im = Image.open(io.BytesIO(data))
+            im.load()
+            out = io.BytesIO()
+            im.convert("RGB").resize(self._size, Image.LANCZOS).save(out, "JPEG", quality=95)
+            if self._size_fixed != size:
+                self._size_fixed = size
+                # 走 logging 而不是 print：Windows 的 PyInstaller 窗口态程序 stdout 是 None，
+                # print 等于丢进黑洞（控制台编码还可能直接抛 UnicodeEncodeError）。
+                logging.getLogger(__name__).warning(
+                    "录制中帧尺寸变化 %dx%d → 已按首帧 %dx%d 统一（否则合成会失败）",
+                    size[0], size[1], self._size[0], self._size[1])
+            return out.getvalue()
+        except Exception:
+            return data
 
     def stop(self) -> Tuple[str, str]:
         """停止录制并后台合成（不阻塞调用方，完成后回调 on_compose_done）。

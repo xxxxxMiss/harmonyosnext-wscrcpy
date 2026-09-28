@@ -4,8 +4,16 @@
 （PySide6），窗口内按钮直接【录制】【截屏】。**目标机零配置**——Python/Qt/Pillow/hdc/ffmpeg
 全部内置，不装 DevEco、不装 ffmpeg、不配 PATH。
 
-技术路线：手表/手机端 `snapshot_display` 连拍 → USB(hdc) → PC 端拉帧渲染/录制。
-设计文档见 [PLAN.md](PLAN.md)。
+三条采集通道（`auto` 依次尝试、逐档自动降级）：
+
+| 通道 | 机制 | 实测帧率 |
+|---|---|---|
+| `stream` | uitest + scrcpy server 虚拟屏 H.264 → gRPC | 手机 30 fps+；手表虚拟屏零帧，不可用 |
+| `agent` | uitest `agent.so` 变化触发 JPEG 推流 | 手表 **1.3~30.8 fps**（= 画面变化率，`scale 0.5` → 233²） |
+| `pull` | PC 逐帧 `snapshot_display` 截图 | 手机 1.6 fps / 手表 0.6 fps |
+
+设计文档见 [PLAN.md](PLAN.md)（第 12 节为 agent 通道）；
+agent 协议逆向全过程见 [research/agent.so协议逆向.md](research/agent.so协议逆向.md)。
 
 ## 使用（最终用户）
 
@@ -14,12 +22,21 @@
 2. 设备开启开发者模式 + USB 调试并授权，数据线连接电脑，点窗口里的 `⟳ 刷新`（或 Ctrl+R）
    自动连接并开始投屏；
 3. 窗口内：`● 录制` 开始/停止（保存对话框默认桌面/图片目录）、`⧉ 截屏`（**自动复制到
-   系统剪贴板**，可直接 ⌘V/Ctrl+V 粘贴；保存文件可选）、`⏻ 退出`；
+   系统剪贴板**，可直接 ⌘V/Ctrl+V 粘贴；保存文件可选）、`◐ 画质`（agent 推流分辨率档位：
+   原生 0.99 / 清晰 0.8 / 流畅 0.5，点击即切换并重启采集）、`⏻ 退出`；
    快捷键 `R` / `S` / `Ctrl+Q` 同效；
 4. 投屏中拔线/掉线会自动回到"未连接"状态，重连后点 `⟳ 刷新` 即可；
 5. 录制完成自动合成 mp4 并清理中间帧，不在磁盘堆积垃圾数据。
 
-帧率约 1–2 fps（受设备端 `snapshot_display` 耗时限制）；隐私页会显示黑帧标记，属预期。
+默认 `auto` 档：手机走 H.264 视频流（30 fps+），手表走 agent 推流
+（**帧率等于画面变化率**：连续滚动实测 30.8 fps，表盘动画 ~1.3 fps，静态页面 0 fps）；
+两者都不可用时才降级到 `snapshot_display` 逐帧截图（手表约 0.6 fps）。
+隐私页会显示黑帧标记，属预期。
+
+> **agent 通道需要华为的 `uitest_agent_v1.2.2.so`**。因版权原因本仓库**不内置**该 so，
+> 程序会按 环境变量 `WSCRCPY_AGENT_SO` → 程序内置 `vendor/so` → DevEco Testing 安装目录
+> → hdckit 依次自动查找，也可用 `--agent-so` 显式指定。找不到时会跳过该档，只跑其它两档。
+> 注意该通道是**变化触发**：手表画面静止时不推帧，程序会用 1 s 心跳维持时间轴（录制不受影响）。
 
 ## 从源码构建（开发者）
 
@@ -31,6 +48,15 @@ pip install -r requirements.txt   # PySide6 / Pillow / pyinstaller
 
 构建机需要：Python 3.10+、本机一份 hdc（DevEco Command Line Tools）、ffmpeg
 （`brew install ffmpeg` / gyan.dev）。CI 见 `.github/workflows/build.yml`。
+
+产物：`dist/Wscrcpy.app`（应用本体）+ `Wscrcpy-macOS.dmg`（拖拽安装包）。
+不做 DMG 时也可直接分发 app 本体：
+
+```bash
+ditto -c -k --sequesterRsrc --keepParent dist/Wscrcpy.app dist/Wscrcpy-macOS-app.zip
+```
+
+构建后想确认包内资源是否就位（**不需要设备**）：`dist/Wscrcpy.app/Contents/MacOS/Wscrcpy --selfcheck`。
 
 ### 构建 Windows 版（无需 Windows 机器）
 
@@ -50,11 +76,23 @@ Wine 跑 Windows Python 的交叉构建方案在 Apple Silicon 上为双层模�
 ## CLI 高级用法
 
 ```bash
-python3 wscrcpy.py --probe            # 真机验证清单（连通/设备类型/单帧/唤醒/sh 能力）
+python3 wscrcpy.py --probe            # 真机验证清单（连通/类型/单帧/唤醒/sh/agent 通道）
+python3 wscrcpy.py --selfcheck        # 资源自检：hdc/ffmpeg/agent.so 从哪来（不需要设备）
 python3 wscrcpy.py --record out.mp4   # 打开 GUI 并立即开始录制
 python3 wscrcpy.py --shot out.jpeg    # 单帧截图后退出（纯 CLI）
-python3 wscrcpy.py --mode loop        # 实验性: 设备端 caploop.sh 连拍提帧率
+python3 wscrcpy.py --mode auto        # 默认: stream → agent → pull 逐档降级
+python3 wscrcpy.py --mode agent       # 强制 agent 推流（uitest agent.so）
+python3 wscrcpy.py --mode pull        # 强制逐帧截图（最稳、最慢）
+python3 wscrcpy.py --agent-scale 0.5  # agent 推流缩放比，必须 <1.0（默认 0.99≈原生 462×462）
+python3 wscrcpy.py --agent-so PATH    # 指定 uitest_agent_vX.Y.Z.so
 python3 wscrcpy.py --serial XXX       # 多设备时指定
+```
+
+打包后的 `.app` 也支持这两个只读命令，例如：
+
+```bash
+dist/Wscrcpy.app/Contents/MacOS/Wscrcpy --selfcheck   # 确认包内 hdc/ffmpeg 就位
+dist/Wscrcpy.app/Contents/MacOS/Wscrcpy --probe       # 接上设备跑验证清单
 ```
 
 ## 项目结构
@@ -65,20 +103,38 @@ wscrcpy.spec               # PyInstaller 打包配置（双平台同源）
 build.sh / build.ps1       # macOS / Windows 一键构建
 scripts/caploop.sh         # 设备端后台连拍脚本（实验性）
 watchscrcpy/
-  ├── gui.py               # PySide6 深色控制台窗口
+  ├── gui.py               # PySide6 深色控制台窗口（采集回落链）
   ├── hdc.py               # hdc 封装：竞态安全截屏、命令降级、日志噪声清洗
+  ├── agent.py             # uitest agent.so 推流通道（协议分帧 / 变化触发推流 / 心跳）
   ├── capture.py           # 拉帧管线（pull / loop 双模式，投屏录制共享）
   ├── recorder.py          # 录制：帧落盘 + ffconcat VFR 合成（后台线程）
   └── resources.py         # 跨平台资源定位 / hdc·ffmpeg 查找链 / 日志目录
+research/                  # 官方实现与 agent.so 协议逆向记录
 vendor/                    # 构建素材（hdc、ffmpeg、caploop.sh），build 脚本自动备齐
 ```
 
 ## 已知限制
 
-- 帧率受截图机制限制（1–2 fps）；触控回注、音频未实现（见 PLAN.md M5+）。
+- **清晰度**：投屏/录制的像素上限 = **设备屏幕本身**（手表 HUAWEI NIZ-AL00 实测
+  `snapshot_display` 原生 **466×466**，agent 推流取 `scale=0.99` → **462×462**）。
+  放到大屏全屏看会觉得软，这是屏幕分辨率的物理上限，不是采样丢的。HUD 里的
+  `FRM 0123 462×462` 就是当前**采集侧真实分辨率**：它若显示 233×233，说明画质档被调到了
+  「流畅」，点 `◐ 画质` 回到「原生」即可（agent 通道帧率由画面变化率决定，**降分辨率
+  并不能换帧率**）。
+- **帧率**：`stream`（手机）30 fps+；`agent`（手表）**等于画面变化率** —— 连续滚动实测
+  30.8 fps、表盘动画 ~1.3 fps、静态页面 0 fps，配合 1 s 心跳把下限抬到 ~1 fps；
+  只有降级到 `pull` 时才受截图机制限制（**手机 1.6 fps / 手表 0.6~0.7 fps**，
+  手表 `snapshot_display` 单帧 1.44 s）。触控回注、音频未实现（见 PLAN.md M5+）。
+- **agent 通道需自备 `uitest_agent.so`**（华为版权，不随包分发）：缺失时自动跳过该档。
+  该通道**变化触发**，静止画面靠 1 s 心跳维持时间轴；首帧需 9~22 s（推 so + 起 daemon + 握手）。
+- **`hdc fport rm` 在部分设备/工具链上失效**（报 `ruler is not exist`）：反复连接会留下
+  可连但不通的残留转发，需 `hdc kill && hdc start` 清理；程序用固定端口 + 自动换端口规避。
 - macOS 未签名应用首次运行需右键 → 打开；Windows 自签名/无签名会过 SmartScreen 提示。
-- 手机已真机全链路验证（见 PLAN.md 第 6 节数据）；手表端三项目（snapshot 存在性、
-  唤醒、圆屏遮罩效果）待手表真机确认。
+- 手机已真机全链路验证（见 PLAN.md 第 6 节）；**手表已真机全链路验证**
+  （HUAWEI NIZ-AL00 / HarmonyOS 7.0.0.109，见 PLAN.md 第 11、12 节）：agent 推流 30.8 fps、
+  录制/GUI/圆遮罩全部通过；因手表虚拟屏不产出帧，H.264 流畅模式在手表上不可用，
+  自动降到 agent 档（**不再是** 0.6 fps 的截图档）。
+- agent 通道仅在 arm64 手表 + uitest 7.0.0.1 上实测；x86_64 / 旧 uitest 未实机验证。
 
 ## 关于 hdc 的版本耦合（重要）
 
@@ -93,3 +149,44 @@ DevEco Studio 内置），开发态亦同序自动探测。也可用 `--hdc-path
 另外注意：部分旧版工具链目录含 `HdcExternal`（1.0.6 外部模式 server），会抢占 5037
 端口且被新手机拒绝；本工具打包时刻意不携带它，排查端口冲突可先
 `lsof -iTCP:5037` 查看 server 归属。
+
+## 连不上设备 / 一直显示「正在扫描设备…」怎么办
+
+**先说清设备是怎么被找到的**：程序不做任何广播/发现协议 —— 它就是把内置的 hdc 当命令行跑
+一次 `hdc list targets`，取每行**第一列**作为序列号（跳过 `[Empty]` 和混入 stdout 的
+`[W]/[E]/[F]` 日志行）；拿到序列号后再用 `hdc -t <sn> shell param get
+const.product.devicetype` 判断机型（手表/手机走不同回落链）。所以
+**「程序能不能看到设备」严格等价于「用同一个 hdc 在终端跑 `hdc list targets` 有没有输出」**。
+
+先分清是**设备侧**还是**程序侧**：在终端跑一次 `hdc list targets`（用程序内置的那个：
+macOS 是 `Wscrcpy.app/Contents/Frameworks/bin/hdc`）。
+
+1. **终端也看不到**（输出 `[Empty]`）→ 设备侧问题，按顺序排查：
+   - 换线/换口重插，点亮手表屏幕，确认弹出的是否允许调试已点「允许」；
+   - `hdc kill && hdc start` 重启本机 hdc 服务（能清掉失效的端口转发与僵死会话）；
+   - 注意**两个 hdc 版本会各起一套服务**（新版 `tcp:8710`、旧版 `tcp:5037`），
+     用 `lsof -nP -iTCP | grep -E '5037|8710'` 看你连的是哪一套。
+2. **终端看得到、程序看不到** → 用 `--hdc-path` 指向你刚验证过的那个 hdc 再启动。
+3. **卡在 loading 不动**：扫描有 20 s 超时并自动重试一次，期间状态栏会显示「正在重试…」；
+   万一连上后迟迟没画面，**45 s 后会自动把「⟳ 刷新」放回来**，点它重试即可，不必强杀进程。
+4. 需要进一步定位时看日志：`~/Library/Logs/wscrcpy.log`（不可写时自动退到系统临时目录下的
+   `wscrcpy.log`，再不行只打 stderr）。关键行：`connected: <序列号> dtype=...`（连上谁、什么类型）、
+   `agent 推流尺寸 462x462（设备显示 466x466，scale=...）`（**清晰度问题第一现场**）、
+   `mode 模式启动失败，尝试下一档: ...`（回落原因）、`list targets 超时`（hdc 无响应）。
+
+## 画面不清晰怎么办
+
+三件事按顺序看，一条条都会在界面上直接体现：
+
+1. **HUD 里的分辨率**（`DEV … FRM 0123 462×462`）—— 这是**采集侧真实像素尺寸**。
+   要是显示 `233×233`、`373×373`，说明画质档被调低了：点底部的 `◐ 画质` 循环切回
+   「原生」（0.99 ≈ 462×462）。**降分辨率在这个通道上换不来帧率**（帧率由画面变化率决定），
+   属于白丢画质。
+2. **上限就是设备屏幕**：手表 HUAWEI NIZ-AL00 是 466×466，`snapshot_display` 原生截图实测
+   466×466 / 25.6 KB。所以录制出来的 mp4 就是 466×466 级别，放到 1440p 屏全屏看必然偏软 ——
+   再好的采集也变不出屏幕上没有的像素。想看细节请用窗口原始比例或 1:1 观察。
+3. **窗口放大倍数**：一个 462px 的源铺满 900×700 的窗口（Retina 上物理像素约 1300），
+   放大近 3 倍。程序已按物理像素一次性重采样（不再二次放大），但放大本身不会增加细节。
+
+若怀疑是"采集丢帧导致糊"，对比一次原图：`⧉ 截屏` 走的是 `snapshot_display` 原生分辨率，
+把它和投屏画面比一下即可区分「源就是这么多像素」还是「推流把它变小了」。
