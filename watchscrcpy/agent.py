@@ -187,11 +187,17 @@ _HOME_SCAN_PRUNE = _SO_PRUNE | {"node_modules", ".venv", "venv", "Temp", ".git",
 
 
 def _normalize_spec(spec: str) -> str:
-    """规整用户/环境变量给的路径：去空白、去成对引号（Windows 复制路径常带引号）、展开 ~。"""
+    """规整用户/环境变量给的路径：去空白、去首尾引号、展开 ~ 与环境变量。
+
+    引号要按"去掉首尾所有引号字符"处理，而不是只认严格成对：
+    Windows 上从资源管理器/终端拖出来的路径常是 `"C:\Program Files\DevEco Testing\"`，
+    末尾的反斜杠在引号**里面**，严格配对判断会漏掉，后面就找不到目录了。
+    """
     s = (spec or "").strip()
-    for _ in range(2):                     # 对付 "…" 或 '…' 甚至 ""…""
-        if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
-            s = s[1:-1].strip()
+    while s[:1] in ("'", '"'):
+        s = s[1:].strip()
+    while s[-1:] in ("'", '"'):
+        s = s[:-1].strip()
     if not s:
         return ""
     return os.path.expanduser(os.path.expandvars(s))

@@ -77,6 +77,9 @@ def main():
     check("带双引号+前后空白仍能解析",
           (pick(f'  "{root}/dv_mac/DevEco Testing.app"  ') or "").endswith("uitest_agent_v1.2.2.so"))
     os.environ["HOME"] = f"{root}/home"                 # expanduser 在 POSIX 上跟 $HOME 走
+    check("Windows 风格带引号（末尾反斜杠在引号内）也能规整",
+          agent._normalize_spec('  "C:\\Program Files\\Huawei\\DevEco Testing\\"  ')
+          == "C:\\Program Files\\Huawei\\DevEco Testing\\")
     check("含 ~ 的路径会展开到用户目录",
           (pick("~/Applications/DevEco_Testing_for_App.app") or "").endswith("uitest_agent_v1.2.2.so"))
     del os.environ["HOME"]

@@ -919,11 +919,11 @@ so 文件，也能给 DevEco Testing 的位置（在其下找 so）；③ 界面
 两条回归测试已随仓库提交，都不需要设备/不需要装 DevEco（自造 DevEco 目录树）：
 
 ```bash
-python3 tests/test_so_resolve.py      # 多路径解析（23 项断言）
+python3 tests/test_so_resolve.py      # 多路径解析（24 项断言）
 python3 tests/test_gui_settings.py    # 界面设置浮层（29 项断言，QT_QPA_PLATFORM=offscreen）
 ```
 
-- **解析行为（23 项断言，全过）**：指文件→直接用；指 `.app` 根 / Windows 风格安装根 /
+- **解析行为（24 项断言，全过）**：指文件→直接用；指 `.app` 根 / Windows 风格安装根 /
   Windows 风格 `native` 目录 / 中间某层（`site-packages`）→ 都能命中；带引号、`~`、前后空白的
   路径能规整；环境变量与配置各走文件/目录两种；`HOME` 换成伪造用户目录后**自动发现**成功；
   版本挑选（`uitest 7.0.0.1→1.2.2`、`5.1.1.2→1.1.3`、`6.0.2.1→1.1.10`、
