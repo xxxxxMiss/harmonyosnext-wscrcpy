@@ -218,7 +218,7 @@ macOS 是 `Wscrcpy.app/Contents/Frameworks/bin/hdc`）。
 前后空白都会被自动处理（`"C:\Program Files\Huawei\DevEco Testing"` 直接粘贴也能用）。
 
 **界面 `⚙ 设置`**：点底部最右的 `⚙ 设置`，浮层里一行提示
-「如要开启原生画质，请配置 DevEco Testing 安装路径。」+ 一个输入框：
+「如要开启原生画质，请配置DevEco Testing安装路径。」+ 一个输入框：
 
 - 输入框里填 DevEco Testing **安装路径**（或直接填 `.so` 文件），点 `保存` 立即生效
   （agent 推流中会自动按新配置重启采集）；

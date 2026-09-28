@@ -70,7 +70,7 @@ def main():
     app.processEvents()
     check("点击后浮层可见", ov.isVisible())
     check("hint 文案逐字一致",
-          ov.hint.text() == "如要开启原生画质，请配置 DevEco Testing 安装路径。",
+          ov.hint.text() == "如要开启原生画质，请配置DevEco Testing安装路径。",
           repr(ov.hint.text()))
     check("hint 在输入框上方",
           ov.hint.geometry().bottom() <= ov.input.geometry().top())

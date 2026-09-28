@@ -218,7 +218,7 @@ class SettingsOverlay(QFrame):
     遮罩铺满主窗口，任何窗口尺寸变化都由父窗口 resizeEvent 同步。
     """
 
-    HINT = "如要开启原生画质，请配置 DevEco Testing 安装路径。"
+    HINT = "如要开启原生画质，请配置DevEco Testing安装路径。"
 
     closed = Signal()                       # 关闭时通知父窗口（用来恢复快捷键）
 
