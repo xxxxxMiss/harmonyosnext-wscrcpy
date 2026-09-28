@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import glob
+import json
 import logging
 import os
 import re
@@ -17,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -169,6 +171,78 @@ def default_save_dir() -> Path:
     else:
         d = Path.home()
     return d if d.is_dir() else Path.home()
+
+
+# --------------------------------------------------------------------------- #
+# 配置（GUI「设置」写入，目前只放 DevEco Testing 安装路径）
+# --------------------------------------------------------------------------- #
+CONFIG_ENV = "WSCRCPY_CONFIG_DIR"      # 便携/测试用：显式指定配置目录
+_FALLBACK_SETTINGS = "wscrcpy-settings.json"
+
+
+def config_dir() -> Path:
+    override = os.environ.get(CONFIG_ENV, "").strip()
+    if override:
+        return Path(override).expanduser()
+    if IS_MACOS:
+        return Path.home() / "Library" / "Application Support" / "wscrcpy"
+    if IS_WINDOWS:
+        return Path(os.environ.get("APPDATA", Path.home())) / "wscrcpy"
+    return Path.home() / ".config" / "wscrcpy"
+
+
+def config_file() -> Path:
+    return config_dir() / "settings.json"
+
+
+def _config_candidates() -> list:
+    """主路径 → 临时目录兜底：沙箱/只读家目录/企业策略下也要能用。"""
+    return [config_file(), Path(tempfile.gettempdir()) / _FALLBACK_SETTINGS]
+
+
+def load_config() -> dict:
+    """读配置；读不到/损坏一律当成「没有配置」，绝不让设置文件拖垮启动。"""
+    for path in _config_candidates():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
+def save_config(cfg: dict) -> str:
+    """原子写配置，返回实际落盘路径（全失败返回空串，调用方据此提示）。
+
+    先写同目录临时文件再 `os.replace`：写一半被打断也不会留下坏 JSON。
+    """
+    data = json.dumps(cfg, ensure_ascii=False, indent=2)
+    for path in _config_candidates():
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(data)
+            os.replace(tmp, path)
+            return str(path)
+        except OSError as e:
+            logging.getLogger(__name__).warning("配置写入失败 %s: %s", path, e)
+            continue
+    return ""
+
+
+def get_setting(key: str, default: str = "") -> str:
+    val = load_config().get(key, default)
+    return val if isinstance(val, str) else default
+
+
+def set_setting(key: str, value: str) -> str:
+    cfg = load_config()
+    cfg[key] = value
+    cfg["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    return save_config(cfg)
 
 
 def find_caploop_script() -> str:

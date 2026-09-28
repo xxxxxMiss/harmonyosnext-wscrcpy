@@ -851,3 +851,92 @@ USB 上可忽略。**没有任何理由为了省流量把画质砍成 1/4 像素
   之所以 460 是合成里 `trunc(iw*1/2)*2` 的偶数对齐）。
 - 顺带把 `parse_jpeg_size` 从 `agent.py` 下移到 `capture.py`（两处都要用；`agent.parse_jpeg_size`
   保留为导入别名，旧调用不受影响）。
+
+---
+
+## 16. agent.so 多路径解析 + 界面「设置」浮层 —— 2026-09-28
+
+**需求**：① 本程序可以装在任意目录，so 查找不要依赖自身位置：先到**用户目录**下找
+DevEco Testing，找到就用它下面的 so；② `--agent-so` / `WSCRCPY_AGENT_SO` 既能直接给
+so 文件，也能给 DevEco Testing 的位置（在其下找 so）；③ 界面底部按钮最右加 `⚙ 设置`，
+点开浮层：输入框**上方**一行提示「如要开启原生画质，请配置 DevEco Testing 安装路径。」。
+总之：**从多条路径解析 so**。
+
+### 16.1 查找顺序（`agent._scan_so_files()`）
+
+| # | 来源 | 代价 | 说明 |
+|---|------|------|------|
+| 1 | `--agent-so` | 零遍历 | 文件→直接用；目录→其下搜索 |
+| 2 | `WSCRCPY_AGENT_SO` | 零遍历 | 同上（语义完全一致） |
+| 3 | 界面 `⚙ 设置` 的 DevEco 路径 | 零遍历 | 写入配置文件，键 `deveco_path` |
+| 4 | 用户目录下的 DevEco Testing | 常见位置零遍历；否则浅层有界扫描 | 深度≤4 / 目录≤300 / ≤0.5s，只认名字含 `deveco` 的目录，最多 4 个根 |
+| 5 | 程序内置 `vendor/so` | 零遍历 | 打包自带的自备 so |
+| 6 | 系统标准安装位置 | 零遍历 + 少量 glob | macOS `/Applications/DevEco*.app`；Windows 按 `ProgramFiles*`/`AppData` 环境变量拼（不写死盘符） |
+| 7 | 定向 glob | 固定层数 | 绝对路径、只含单层 `*` |
+| 8 | 有界兜底遍历 | 预算 0.75s | 深度/目录数/时长三重预算 |
+
+**前一级有结果就不进下一级**；1~2 级解析不出 so 时**记 WARNING 后继续**（写错路径不会让功能卡死，
+而是回落到其它来源）。整体带缓存，缓存键 = `(--agent-so, 环境变量, 配置里的路径)`：
+改设置/换环境变量/换命令行参数都会自动重扫。cold 实测 **0.039 s**，命中缓存 **0.0001 s**
+（本机 `~/` 下有 4 个含 `deveco` 的目录，含 DevEco **Studio** 的下载包，扫它们也不到 40 ms）。
+
+### 16.2 每级候选根怎么搜（`agent.search_deveco_root()`）
+
+先按**已知相对布局**做零遍历 glob（`res/prototype/native/uitest_agent_v*.so`、
+`devicetest/res/…`、`Contents/Python/lib/python3.*/site-packages/devicetest/res/…` 等，
+全是**单层 `*`**——`**` 曾经以 CWD 为起点退化成全盘遍历，见 §14.6，不再使用）；
+布局不匹配（用户指到了中间某一层，如 `.../site-packages`）再走有界遍历兜底。
+
+### 16.3 界面「设置」
+
+- 按钮位置：底部栏**最右**（`刷新 | 画质 | … | 录制 截屏 退出 | … | ⚙ 设置`），
+  未连接设备也能点（纯本地配置）。
+- 浮层：铺满主窗口的半透明遮罩 + 居中卡片；**提示语在输入框上方**（需求原文）；
+  下面是输入框、`浏览…`（优先选目录，也可选 so 文件）、`取消`、`保存`。
+- 交互：`Esc` / 点遮罩空白处 / `取消` 关闭；`保存`（或回车）——
+  - 合法（路径存在且其下有 `uitest_agent_v*.so`）→ 写配置、清缓存、**立即生效**：
+    agent 推流中则自动按新配置重启采集；
+  - 不合法 → **不保存**，浮层保持打开并说明原因（路径不存在 / 底下没找到 so）；
+  - **留空 → 清空配置**，回到自动查找顺序。
+- 已知坑（已处理）：窗口级 `R`/`S` 快捷键是 `WindowShortcut`，会**抢走输入框的按键**
+  —— 打开设置时临时停用、关闭时恢复（`SettingsOverlay.closed` 信号）。
+- 浮层 geometry 由主窗口 `resizeEvent` 同步（`_build_ui` 之前就会触发 resize，故用 `getattr` 兜底）。
+
+### 16.4 配置落盘（`resources.py`）
+
+| 平台 | 路径 |
+|------|------|
+| macOS | `~/Library/Application Support/wscrcpy/settings.json` |
+| Windows | `%APPDATA%\wscrcpy\settings.json` |
+| Linux | `~/.config/wscrcpy/settings.json` |
+
+`WSCRCPY_CONFIG_DIR` 可整体改到别处（便携/测试用）。写入是**先写 `.tmp` 再 `os.replace`**
+（写一半断电不留坏 JSON）；读配置任何异常都当"没有配置"。主路径不可写（只读家目录/企业策略）
+时退到系统临时目录，并在界面提示"仅本次运行生效"——和日志目录同一套降级思路。
+
+### 16.5 验证
+
+两条回归测试已随仓库提交，都不需要设备/不需要装 DevEco（自造 DevEco 目录树）：
+
+```bash
+python3 tests/test_so_resolve.py      # 多路径解析（23 项断言）
+python3 tests/test_gui_settings.py    # 界面设置浮层（29 项断言，QT_QPA_PLATFORM=offscreen）
+```
+
+- **解析行为（23 项断言，全过）**：指文件→直接用；指 `.app` 根 / Windows 风格安装根 /
+  Windows 风格 `native` 目录 / 中间某层（`site-packages`）→ 都能命中；带引号、`~`、前后空白的
+  路径能规整；环境变量与配置各走文件/目录两种；`HOME` 换成伪造用户目录后**自动发现**成功；
+  版本挑选（`uitest 7.0.0.1→1.2.2`、`5.1.1.2→1.1.3`、`6.0.2.1→1.1.10`、
+  目标版本不在该目录时不误用更高版本）；写错路径 → 回落本机真实 DevEco 且耗时 0.02 s；
+  第二次调用走缓存。
+- **界面（29 项断言，全过，`QT_QPA_PLATFORM=offscreen`）**：设置按钮确在**最右**
+  （右边界 915 vs 退出 640）；浮层 hint 文案逐字一致且位于输入框上方；保存合法路径→
+  配置落盘 `{"deveco_path": ...}`、浮层关闭、状态栏给出结论、解析立即生效；
+  再次打开预填；非法路径不保存且不关窗；`Esc` 关闭；空值清空配置后回落自动查找；
+  resize 后浮层仍铺满；直接填 so 文件同样接受。
+- **CLI**：`--selfcheck` 第 7 项在「默认 / `--agent-so` 指目录 / 指文件 / 环境变量指目录」
+  四种情况下分别打印出正确路径。
+- **真机回归**：⚠ 本轮未能复跑——手表当时 `hdc list targets -v` 显示 **Offline**，
+  `shell` 全部 `[E001005] Device not found or connected`，重启 hdc server 与换 SDK hdc
+  （3.2.0c）后仍不可达（设备侧休眠/链路问题，非程序问题）。改动只涉及「挑哪个 so」与界面，
+  设备侧协议路径未动；待设备可连后按 `--probe` 第 7 项 + 日志 `agent.so: … (v1.2.2)` 复验。

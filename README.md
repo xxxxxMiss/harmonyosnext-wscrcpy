@@ -23,7 +23,8 @@ agent 协议逆向全过程见 [research/agent.so协议逆向.md](research/agent
    自动连接并开始投屏；
 3. 窗口内：`● 录制` 开始/停止（保存对话框默认桌面/图片目录）、`⧉ 截屏`（**自动复制到
    系统剪贴板**，可直接 ⌘V/Ctrl+V 粘贴；保存文件可选）、`◐ 画质`（agent 推流分辨率档位：
-   原生 0.99 / 清晰 0.8 / 流畅 0.5，点击即切换并重启采集）、`⏻ 退出`；
+   原生 0.99 / 清晰 0.8 / 流畅 0.5，点击即切换并重启采集）、`⏻ 退出`、最右侧
+   `⚙ 设置`（配置 DevEco Testing 安装路径，用来开启原生画质）；
    快捷键 `R` / `S` / `Ctrl+Q` 同效；
 4. 投屏中拔线/掉线会自动回到"未连接"状态，重连后点 `⟳ 刷新` 即可；
 5. 录制完成自动合成 mp4 并清理中间帧，不在磁盘堆积垃圾数据。
@@ -34,8 +35,9 @@ agent 协议逆向全过程见 [research/agent.so协议逆向.md](research/agent
 隐私页会显示黑帧标记，属预期。
 
 > **agent 通道需要华为的 `uitest_agent_v1.2.2.so`**。因版权原因本仓库**不内置**该 so，
-> 程序会按 环境变量 `WSCRCPY_AGENT_SO` → 程序内置 `vendor/so` → DevEco Testing 安装目录
-> → hdckit 依次自动查找，也可用 `--agent-so` 显式指定。找不到时会跳过该档，只跑其它两档。
+> 程序会从多条路径自动查找（详见下节「原生画质 / agent.so 从哪里找」），也可以在界面
+> `⚙ 设置` 里指定 DevEco Testing 安装路径，或用 `--agent-so` / 环境变量 `WSCRCPY_AGENT_SO`
+> 指定 so 文件或 DevEco Testing 目录。找不到时会跳过该档，只跑其它两档。
 > 注意该通道是**变化触发**：手表画面静止时不推帧，程序会用 1 s 心跳维持时间轴（录制不受影响）。
 
 ## 从源码构建（开发者）
@@ -84,8 +86,18 @@ python3 wscrcpy.py --mode auto        # 默认: stream → agent → pull 逐档
 python3 wscrcpy.py --mode agent       # 强制 agent 推流（uitest agent.so）
 python3 wscrcpy.py --mode pull        # 强制逐帧截图（最稳、最慢）
 python3 wscrcpy.py --agent-scale 0.5  # agent 推流缩放比，必须 <1.0（默认 0.99≈原生 462×462）
-python3 wscrcpy.py --agent-so PATH    # 指定 uitest_agent_vX.Y.Z.so
+python3 wscrcpy.py --agent-so PATH    # PATH 可为 .so 文件，也可为 DevEco Testing 安装目录
 python3 wscrcpy.py --serial XXX       # 多设备时指定
+```
+
+`--agent-so` 与 `WSCRCPY_AGENT_SO` 都接受**两种**写法：
+
+```bash
+# ① 直接给 so 文件
+python3 wscrcpy.py --agent-so /path/to/uitest_agent_v1.2.2.so
+# ② 给 DevEco Testing 的安装路径（程序在它下面找 so；版本/架构自动按设备挑）
+python3 wscrcpy.py --agent-so "/Applications/DevEco Testing.app"
+python3 wscrcpy.py --agent-so "C:\Program Files\Huawei\DevEco Testing"
 ```
 
 打包后的 `.app` 也支持这两个只读命令，例如：
@@ -93,6 +105,14 @@ python3 wscrcpy.py --serial XXX       # 多设备时指定
 ```bash
 dist/Wscrcpy.app/Contents/MacOS/Wscrcpy --selfcheck   # 确认包内 hdc/ffmpeg 就位
 dist/Wscrcpy.app/Contents/MacOS/Wscrcpy --probe       # 接上设备跑验证清单
+```
+
+## 自检与回归测试
+
+```bash
+python3 wscrcpy.py --selfcheck           # 本机资源/so 定位（不需要设备）
+python3 tests/test_so_resolve.py         # so 多路径解析回归（不需要设备）
+python3 tests/test_gui_settings.py       # 界面「设置」浮层回归（离屏渲染，不需要设备）
 ```
 
 ## 项目结构
@@ -108,7 +128,7 @@ watchscrcpy/
   ├── agent.py             # uitest agent.so 推流通道（协议分帧 / 变化触发推流 / 心跳）
   ├── capture.py           # 拉帧管线（pull / loop 双模式，投屏录制共享）
   ├── recorder.py          # 录制：帧落盘 + ffconcat VFR 合成（后台线程）
-  └── resources.py         # 跨平台资源定位 / hdc·ffmpeg 查找链 / 日志目录
+  └── resources.py         # 跨平台资源定位 / hdc·ffmpeg 查找链 / 日志·配置目录
 research/                  # 官方实现与 agent.so 协议逆向记录
 vendor/                    # 构建素材（hdc、ffmpeg、caploop.sh），build 脚本自动备齐
 ```
@@ -125,7 +145,8 @@ vendor/                    # 构建素材（hdc、ffmpeg、caploop.sh），build
   30.8 fps、表盘动画 ~1.3 fps、静态页面 0 fps，配合 1 s 心跳把下限抬到 ~1 fps；
   只有降级到 `pull` 时才受截图机制限制（**手机 1.6 fps / 手表 0.6~0.7 fps**，
   手表 `snapshot_display` 单帧 1.44 s）。触控回注、音频未实现（见 PLAN.md M5+）。
-- **agent 通道需自备 `uitest_agent.so`**（华为版权，不随包分发）：缺失时自动跳过该档。
+- **agent 通道需自备 `uitest_agent.so`**（华为版权，不随包分发）：缺失时自动跳过该档
+  （从哪里找见「原生画质 / agent.so 从哪里找」；界面 `⚙ 设置` 里也能直接配）。
   该通道**变化触发**，静止画面靠 1 s 心跳维持时间轴；首帧需 9~22 s（推 so + 起 daemon + 握手）。
 - **`hdc fport rm` 在部分设备/工具链上失效**（报 `ruler is not exist`）：反复连接会留下
   可连但不通的残留转发，需 `hdc kill && hdc start` 清理；程序用固定端口 + 自动换端口规避。
@@ -173,6 +194,55 @@ macOS 是 `Wscrcpy.app/Contents/Frameworks/bin/hdc`）。
    `wscrcpy.log`，再不行只打 stderr）。关键行：`connected: <序列号> dtype=...`（连上谁、什么类型）、
    `agent 推流尺寸 462x462（设备显示 466x466，scale=...）`（**清晰度问题第一现场**）、
    `mode 模式启动失败，尝试下一档: ...`（回落原因）、`list targets 超时`（hdc 无响应）。
+
+## 原生画质 / agent.so 从哪里找
+
+原生画质（agent 通道）要华为自带的 `uitest_agent_v*.so`（在 **DevEco Testing** 里，
+本仓库因版权不内置）。程序可以从**多条路径**找到它——本程序装在哪个目录都不影响。
+
+**查找顺序**（前一条有结果就不再往下找）：
+
+| # | 来源 | 说明 |
+|---|------|------|
+| 1 | `--agent-so <路径>` | 命令行显式指定，优先级最高 |
+| 2 | 环境变量 `WSCRCPY_AGENT_SO` | 同上，适合做启动脚本/快捷方式 |
+| 3 | 界面 `⚙ 设置` 里配置的路径 | 写进配置文件，长期生效 |
+| 4 | **用户目录**下的 DevEco Testing | 自动发现：常见位置（`~/Applications/DevEco Testing.app`、`~/DevEco Testing` 等）先零遍历命中；再在用户目录里浅层扫描名字含 `deveco` 的目录（带深度/目录数/时长预算） |
+| 5 | 程序内置 `vendor/so` | 打包时随程序带的自备 so（仓库默认不带） |
+| 6 | 系统标准安装位置 | macOS `/Applications/DevEco Testing.app`；Windows `%ProgramFiles%\Huawei\…` 等（按环境变量找，不写死盘符） |
+| 7 | 定向 glob | 只匹配已知的几层相对目录（绝对路径、单层 `*`） |
+| 8 | 有界兜底遍历 | 深度/目录数/时长三重预算，绝不整盘遍历 |
+
+**1~3 这三条「显式指定」的语义是一样的**：既可以填 `uitest_agent_v1.2.2.so` **文件本身**，
+也可以填 **DevEco Testing 的安装目录**（程序会在它下面搜索 so）。路径里的引号、`~`、
+前后空白都会被自动处理（`"C:\Program Files\Huawei\DevEco Testing"` 直接粘贴也能用）。
+
+**界面 `⚙ 设置`**：点底部最右的 `⚙ 设置`，浮层里一行提示
+「如要开启原生画质，请配置 DevEco Testing 安装路径。」+ 一个输入框：
+
+- 输入框里填 DevEco Testing **安装路径**（或直接填 `.so` 文件），点 `保存` 立即生效
+  （agent 推流中会自动按新配置重启采集）；
+- `浏览…` 优先选目录，也可以直接选 `.so` 文件；`取消` / `Esc` / 点浮层空白处关闭；
+- **留空保存＝清空配置**，回到上面的自动查找顺序；
+- 路径不合法（不存在 / 底下没有 `uitest_agent_v*.so`）时**不会保存**，浮层里直接说明原因。
+
+配置文件位置（一个 JSON，键名 `deveco_path`）：
+
+| 平台 | 路径 |
+|------|------|
+| macOS | `~/Library/Application Support/wscrcpy/settings.json` |
+| Windows | `%APPDATA%\wscrcpy\settings.json` |
+| Linux | `~/.config/wscrcpy/settings.json` |
+
+想把它放到别处（便携部署/U 盘）就设环境变量 `WSCRCPY_CONFIG_DIR=<目录>`。
+如果这个位置写不进去（只读家目录、企业策略等），程序会退到系统临时目录并照常工作，
+界面会提示"仅本次运行生效"。
+
+**怎么确认它到底用了哪个 so**：
+
+- 界面连上设备后，日志里有 `agent.so: <完整路径> (vX) uitest=… arch=…`；
+- 不进界面：`Wscrcpy --selfcheck` 第 7 项直接打印最终选中的 so 路径；
+- 显式指定的路径没解析出 so 时**不会卡死**，只会记一条 WARNING 然后继续试其它来源。
 
 ## 画面不清晰怎么办
 

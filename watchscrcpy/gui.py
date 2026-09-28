@@ -13,15 +13,18 @@ import math
 import os
 import threading
 import time
+from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QKeySequence, QPainter, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel,
-                               QPushButton, QSizePolicy, QVBoxLayout, QWidget)
+                               QLineEdit, QPushButton, QSizePolicy, QVBoxLayout, QWidget)
 
 from . import resources
-from .agent import AgentCapture, capture_supported as agent_supported
+from .agent import (AgentCapture, SETTING_DEVECO_PATH,
+                    capture_supported as agent_supported, clear_so_cache,
+                    describe_deveco_path)
 from .capture import BaseCapture, Frame, PulledCapture
 from .hdc import HOST_TEMP, TMP_DIR, Hdc, HdcError
 from .recorder import Recorder
@@ -59,6 +62,16 @@ QPushButton[neon="true"]:disabled {{ color: #3A4661; border-color: {LINE}; }}
 QPushButton[neon="true"][rec="true"] {{
     color: {RED}; border-color: {RED}; background: rgba(255,59,92,0.10);
 }}
+#overlay {{ background: rgba(4,8,16,0.74); }}
+#card {{ background: {PANEL}; border: 1px solid {LINE}; border-radius: 12px; }}
+#cardTitle {{ color: #E6F1FF; font-size: 14px; font-weight: 600; letter-spacing: 3px; }}
+#cardHint {{ color: {NEON}; font-size: 12px; }}
+#cardNote {{ color: {DIM}; font-family: {MONO}; font-size: 11px; }}
+#cardMsg {{ color: {TEXT}; font-size: 12px; }}
+#cardMsg[bad="true"] {{ color: {RED}; }}
+#cardInput {{ color: #E6F1FF; background: rgba(10,14,26,0.9); border: 1px solid {LINE};
+              border-radius: 6px; padding: 9px 11px; font-family: {MONO}; font-size: 12px; }}
+#cardInput:focus {{ border-color: {NEON}; }}
 """
 
 
@@ -198,6 +211,143 @@ class VideoPanel(QWidget):
             p.drawLine(QPointF(cx, cy), QPointF(cx + dx * arm, cy))
 
 
+class SettingsOverlay(QFrame):
+    """「设置」浮层：整窗半透明遮罩 + 居中卡片。
+
+    只配置一件事：DevEco Testing 安装路径（用于找 agent.so 开原生画质）。
+    遮罩铺满主窗口，任何窗口尺寸变化都由父窗口 resizeEvent 同步。
+    """
+
+    HINT = "如要开启原生画质，请配置 DevEco Testing 安装路径。"
+
+    closed = Signal()                       # 关闭时通知父窗口（用来恢复快捷键）
+
+    def __init__(self, parent, on_save):
+        super().__init__(parent)
+        self.setObjectName("overlay")
+        self._on_save = on_save                 # 回调 (输入文本) -> (是否接受, 提示文案)
+        self.hide()
+
+        card = QFrame(self)
+        card.setObjectName("card")
+        card.setFixedWidth(560)
+        self.card = card
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(26, 22, 26, 20)
+        lay.setSpacing(10)
+
+        title = QLabel("设置", card)
+        title.setObjectName("cardTitle")
+        # 提示语在输入框**上方**（按需求原文）
+        self.hint = QLabel(self.HINT, card)
+        self.hint.setObjectName("cardHint")
+        self.hint.setWordWrap(True)
+        self.input = QLineEdit(card)
+        self.input.setObjectName("cardInput")
+        self.input.setPlaceholderText("例如 /Applications/DevEco Testing.app"
+                                      " 或 C:\\Program Files\\Huawei\\DevEco Testing")
+        self.input.returnPressed.connect(self._save)
+        note = QLabel("填 DevEco Testing 安装目录，或直接填 uitest_agent_v*.so 文件；"
+                      "留空＝按默认顺序自动查找。保存后立即生效。", card)
+        note.setObjectName("cardNote")
+        note.setWordWrap(True)
+        self.msg = QLabel("", card)
+        self.msg.setObjectName("cardMsg")
+        self.msg.setWordWrap(True)
+        self.msg.hide()
+
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        self.btn_browse = QPushButton("浏览…", card)
+        self.btn_browse.setProperty("neon", True)
+        self.btn_browse.setCursor(Qt.PointingHandCursor)
+        self.btn_browse.clicked.connect(self._browse)
+        self.btn_cancel = QPushButton("取消", card)
+        self.btn_cancel.setProperty("neon", True)
+        self.btn_cancel.setCursor(Qt.PointingHandCursor)
+        self.btn_cancel.clicked.connect(self.close_overlay)
+        self.btn_save = QPushButton("保存", card)
+        self.btn_save.setProperty("neon", True)
+        self.btn_save.setCursor(Qt.PointingHandCursor)
+        self.btn_save.clicked.connect(self._save)
+        row.addWidget(self.btn_browse)
+        row.addStretch(1)
+        row.addWidget(self.btn_cancel)
+        row.addWidget(self.btn_save)
+
+        lay.addWidget(title)
+        lay.addWidget(self.hint)
+        lay.addWidget(self.input)
+        lay.addWidget(note)
+        lay.addWidget(self.msg)
+        lay.addSpacing(4)
+        lay.addLayout(row)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addStretch(1)
+        outer.addWidget(card, 0, Qt.AlignHCenter)
+        outer.addStretch(1)
+
+    # ---- 生命周期 ----
+    def open_overlay(self, current: str):
+        self.input.setText(current or "")
+        self._set_msg("", bad=False)
+        self.setGeometry(self.parentWidget().rect())
+        self.show()
+        self.raise_()
+        self.input.setFocus()
+        self.input.selectAll()
+
+    def close_overlay(self):
+        if not self.isVisible():
+            return
+        self.hide()
+        self.closed.emit()
+
+    def sync_geometry(self):
+        if self.isVisible():
+            self.setGeometry(self.parentWidget().rect())
+
+    def _set_msg(self, text: str, bad: bool):
+        self.msg.setText(text)
+        self.msg.setProperty("bad", "true" if bad else "false")
+        self.msg.style().unpolish(self.msg)
+        self.msg.style().polish(self.msg)
+        self.msg.setVisible(bool(text))
+
+    def _browse(self):
+        """挑目录优先（DevEco 安装路径就是目录）；也允许直接挑 so 文件。"""
+        start = self.input.text().strip() or str(Path.home())
+        d = QFileDialog.getExistingDirectory(self, "选择 DevEco Testing 安装目录", start)
+        if d:
+            self.input.setText(d)
+            return
+        f, _ = QFileDialog.getOpenFileName(self, "或直接选择 agent.so", start,
+                                           "agent.so (uitest_agent_v*.so);;所有文件 (*)")
+        if f:
+            self.input.setText(f)
+
+    def _save(self):
+        ok, text = self._on_save(self.input.text())
+        self._set_msg(text, bad=not ok)
+        if ok:
+            self.close_overlay()
+
+    # ---- 交互：点遮罩空白处关闭、Esc 关闭 ----
+    def mousePressEvent(self, ev):
+        if not self.card.geometry().contains(ev.position().toPoint()):
+            self.close_overlay()
+            return
+        super().mousePressEvent(ev)
+
+    def keyPressEvent(self, ev):
+        if ev.key() == Qt.Key_Escape:
+            self.close_overlay()
+            return
+        super().keyPressEvent(ev)
+
+
 class MirrorWindow(QWidget):
     """主窗口：标题栏 + HUD 条 + 视频面板 + 状态栏 + 按钮栏。
 
@@ -314,11 +464,22 @@ class MirrorWindow(QWidget):
             b.setCursor(Qt.PointingHandCursor)
             btn_wrap.addWidget(b)
         btn_wrap.addStretch(1)
+        # 设置放**最右**：与设备无关的本地配置，未连接也要能点
+        self.btn_settings = QPushButton("⚙ 设置")
+        self.btn_settings.setProperty("neon", True)
+        self.btn_settings.setCursor(Qt.PointingHandCursor)
+        self.btn_settings.setToolTip("配置 DevEco Testing 安装路径（用于开启原生画质推流）")
+        btn_wrap.addWidget(self.btn_settings)
         root.addLayout(btn_wrap)
 
         self.btn_rec.clicked.connect(self.toggle_record)
         self.btn_shot.clicked.connect(self.save_screenshot)
         self.btn_quit.clicked.connect(self.close)
+        self.btn_settings.clicked.connect(self.open_settings)
+
+        # 设置浮层：铺满主窗口的遮罩 + 居中卡片（geometry 由 resizeEvent 跟随）
+        self.settings = SettingsOverlay(self, self._on_settings_save)
+        self.settings.closed.connect(self._on_settings_closed)
 
         self.rec_timer = QTimer(self)
         self.rec_timer.timeout.connect(self._tick_rec_time)
@@ -328,10 +489,14 @@ class MirrorWindow(QWidget):
         self._set_connected_ui(False)
 
     def _bind_keys(self):
-        QShortcut(QKeySequence("R"), self, activated=self.toggle_record)
-        QShortcut(QKeySequence("S"), self, activated=self.save_screenshot)
-        QShortcut(QKeySequence("Ctrl+R"), self, activated=self.refresh)
-        QShortcut(QKeySequence("Ctrl+Q"), self, activated=self.close)
+        # 存起来是为了在设置浮层输入时**临时停用**：这些是 WindowShortcut，
+        # 不停用的话在输入框里敲 R/S 会被录制/截屏抢走（Qt 快捷键先于焦点控件处理）。
+        self._shortcuts = [
+            QShortcut(QKeySequence("R"), self, activated=self.toggle_record),
+            QShortcut(QKeySequence("S"), self, activated=self.save_screenshot),
+            QShortcut(QKeySequence("Ctrl+R"), self, activated=self.refresh),
+            QShortcut(QKeySequence("Ctrl+Q"), self, activated=self.close),
+        ]
 
     # ---------- 连接状态机 ----------
     def _set_connected_ui(self, connected: bool):
@@ -365,6 +530,75 @@ class MirrorWindow(QWidget):
                         for lb, sc in self.QUALITY_PRESETS)
             + f"\n当前：scale {self.agent_scale:g}")
 
+    # ---------- 设置 ----------
+    def open_settings(self):
+        """弹出设置浮层（预填当前配置）。"""
+        for sc in getattr(self, "_shortcuts", []):
+            sc.setEnabled(False)
+        self.settings.open_overlay(resources.get_setting(SETTING_DEVECO_PATH))
+
+    def _on_settings_closed(self):
+        for sc in getattr(self, "_shortcuts", []):
+            sc.setEnabled(True)
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        overlay = getattr(self, "settings", None)   # _build_ui 之前也会触发 resize
+        if overlay is not None:
+            overlay.sync_geometry()
+
+    def _on_settings_save(self, raw: str):
+        """保存 DevEco Testing 路径。返回 (是否接受, 给用户看的提示)。"""
+        text = (raw or "").strip()
+        if not text:
+            where = resources.set_setting(SETTING_DEVECO_PATH, "")
+            clear_so_cache()
+            logging.info("设置：清空 DevEco Testing 路径（写盘=%r）", where)
+            self._on_status("已清空 DevEco Testing 路径，恢复自动查找", err=False)
+            self._maybe_restart_for_settings()
+            return True, "已清空，恢复自动查找"
+
+        ok, msg = describe_deveco_path(text)
+        if not ok:
+            logging.warning("设置：路径不可用 %r —— %s", text, msg)
+            return False, msg
+
+        where = resources.set_setting(SETTING_DEVECO_PATH, text)
+        clear_so_cache()
+        logging.info("设置：DevEco 路径 = %r（%s），写盘=%r", text, msg, where)
+        note = "" if where else "（配置文件写入失败，仅本次运行生效）"
+        self._on_status(f"设置已保存：{msg}{note}", err=False)
+        self._maybe_restart_for_settings()
+        return True, f"已保存：{msg}{note}"
+
+    def _maybe_restart_for_settings(self):
+        """设置改了 so 来源：agent 推流中就用新配置重启采集，否则下次连接自然生效。"""
+        if self.hdc is None or self.effective_mode != "agent":
+            return
+        self._on_status("设置已更新，正在按新配置重启采集…", err=False)
+        self._restart_capture_async("设置变更")
+
+    # ---------- 采集重启（画质切换 / 设置变更共用）----------
+    def _restart_capture_async(self, why: str) -> bool:
+        """收干净旧采集后重启；成功排上队返回 True。"""
+        if self._quality_switching:
+            self._on_status("采集正在重启中，请稍候…", err=False)
+            return False
+        logging.info("%s：重启采集", why)
+        # 置灰 + 置位：重启完成前不接受第二次点击（否则两个重启流程会互相踩）
+        self.btn_quality.setEnabled(False)
+        self._quality_switching = True
+
+        def work():
+            # 收旧采集必须在**工作线程**里等它彻底死掉：AgentCapture 收尾会
+            # `pkill uitest.*start-daemon`，若旧线程还活着就起了新的，旧线程的 pkill
+            # 会把新 daemon 一起杀掉（实测现象：切完画质 2 秒后「设备连接已断开」）。
+            self._teardown_capture(wait=20.0)
+            self.bridge.quality_restart.emit()
+
+        threading.Thread(target=work, daemon=True).start()
+        return True
+
     def cycle_quality(self):
         """切换 agent 推流分辨率；正在 agent 推流时立即按新档重启采集。"""
         if self._quality_switching:
@@ -381,20 +615,8 @@ class MirrorWindow(QWidget):
             self._on_status("画质档位只对 agent 推流生效"
                             "（当前是 pull 逐帧截图，本身就是原生分辨率）", err=False)
             return
-        logging.info("切换画质: scale=%.2f，重启 agent 采集", scale)
         self._on_status(f"{text}，正在按新档重启采集…", err=False)
-        # 置灰 + 置位：切换完成前不接受第二次点击（否则两个重启流程会互相踩）
-        self.btn_quality.setEnabled(False)
-        self._quality_switching = True
-
-        def work():
-            # 收旧采集必须在**工作线程**里等它彻底死掉：AgentCapture 收尾会
-            # `pkill uitest.*start-daemon`，若旧线程还活着就起了新的，旧线程的 pkill
-            # 会把新 daemon 一起杀掉（实测现象：切完画质 2 秒后「设备连接已断开」）。
-            self._teardown_capture(wait=20.0)
-            self.bridge.quality_restart.emit()
-
-        threading.Thread(target=work, daemon=True).start()
+        self._restart_capture_async(f"切换画质 scale={scale:g}")
 
     def _restart_capture(self):
         """UI 线程槽：旧采集已收干净，按新画质档重启（采集本身在各自线程里跑）。"""

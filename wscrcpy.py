@@ -23,6 +23,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Optional
 
 from watchscrcpy import resources
 from watchscrcpy.hdc import Hdc, HdcError
@@ -47,7 +48,9 @@ def parse_args() -> argparse.Namespace:
                    help="agent 推流缩放比，必须 <1.0（默认 0.99≈原分辨率 462×462；"
                         "0.5 只有 233×233，画面明显发糊，仅在带宽/性能受限时用）")
     p.add_argument("--agent-so", default=None,
-                   help="指定 uitest agent.so 路径（默认自动查找 DevEco Testing/hdckit 自带）")
+                   help="指定 agent.so 来源：可以是 uitest_agent_v*.so 文件本身，"
+                        "也可以是 DevEco Testing 安装目录（会在其下搜索）。"
+                        "不指定则按 环境变量 → 设置 → 用户目录/标准位置 → 内置 → 兜底 查找")
     p.add_argument("--no-wakeup", action="store_true", help="启动时不尝试唤醒亮屏")
     p.add_argument("--probe", action="store_true", help="运行真机验证清单（CLI）")
     p.add_argument("--selfcheck", action="store_true",
@@ -72,7 +75,7 @@ def connect(args) -> Hdc:
     return Hdc(args.hdc_path, serial)
 
 
-def selfcheck() -> int:
+def selfcheck(spec: Optional[str] = None) -> int:
     """打印资源解析结果（**不需要设备**），用于排查「打包后找不到 hdc/ffmpeg/agent.so」。"""
     from watchscrcpy import resources
     from watchscrcpy.agent import find_agent_so
@@ -96,7 +99,7 @@ def selfcheck() -> int:
     show(5, "ffmpeg", resources.find_ffmpeg())
     show(6, "caploop.sh", resources.find_caploop_script())
 
-    so = find_agent_so("", "")
+    so = find_agent_so("", "", spec)
     if so:
         where = "内置" if str(root) in so else "本机"
         print(f"7. agent.so          ✓  [{where}] {so}")
@@ -134,7 +137,7 @@ def _probe_frame_path() -> Path:
     return Path(tempfile.gettempdir()) / "wscrcpy_probe_frame.jpeg"
 
 
-def probe(hdc: Hdc) -> None:
+def probe(hdc: Hdc, spec: Optional[str] = None) -> None:
     """PLAN.md 第6节验证清单的自动化版。"""
     print("== wscrcpy 真机验证清单 ==")
     ok = lambda b: "✓" if b else "✗"
@@ -180,7 +183,7 @@ def probe(hdc: Hdc) -> None:
         print(f"6. sh 脚本能力       ✗  {e}")
     try:
         from watchscrcpy.agent import capture_supported as agent_supported
-        agent_ok, why = agent_supported(hdc)
+        agent_ok, why = agent_supported(hdc, spec)
         print(f"7. agent 推流通道    {ok(agent_ok)}  {why}")
     except Exception as e:
         print(f"7. agent 推流通道    ✗  {type(e).__name__}: {e}")
@@ -243,7 +246,7 @@ def shot(hdc: Hdc, out: str) -> int:
 def main() -> int:
     args = parse_args()
     if args.selfcheck:                   # 纯本地自检，不需要设备
-        return selfcheck()
+        return selfcheck(args.agent_so)
     if args.probe or args.shot:          # 纯 CLI 场景需要先连设备
         try:
             hdc = connect(args)
@@ -251,7 +254,7 @@ def main() -> int:
             print(f"[!] {e}", file=sys.stderr)
             return 1
         if args.probe:
-            probe(hdc)
+            probe(hdc, args.agent_so)
             return 0
         return shot(hdc, args.shot)
     return mirror(args)                  # GUI 自带扫描/连接状态机，无设备也能启动

@@ -54,7 +54,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterator, List, Optional, Sequence, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple
 
 from . import resources
 from .capture import BaseCapture, FrameCallback, parse_jpeg_size
@@ -153,6 +153,193 @@ def _so_roots() -> Tuple[str, ...]:
     return tuple(out)
 
 
+# --------------------------------------------------------------------------- #
+# agent.so 的多路径解析
+#
+# 显式来源（--agent-so / WSCRCPY_AGENT_SO / GUI 设置）**既可以是 so 文件本身，
+# 也可以是 DevEco Testing 的安装路径**——后者在其下搜索 so。
+# 没有任何显式来源时，按「用户目录下的 DevEco Testing → 程序内置 → 各平台标准安装
+# 位置 → 定向 glob → 有界兜底遍历」逐级找。本程序可装在任意目录，所以自动发现
+# 只看用户目录/标准位置，不依赖自身所在路径。
+# --------------------------------------------------------------------------- #
+SETTING_DEVECO_PATH = "deveco_path"        # GUI「设置」写入配置文件的键名
+_DEVTEST_NAME_MARK = "deveco"              # 自动发现时按目录名关键字匹配
+
+# DevEco Testing 安装根下 so 的**已知相对布局**。
+# ⚠ 全部是单层 `*`：绝不用 `**`——相对/递归 glob 会以 CWD 为起点退化成全盘遍历
+# （见 _so_roots() 上方的教训）。不在已知布局里的靠 _bounded_find_so 兜底。
+_DEVTEST_SO_RELS = (
+    "res/prototype/native/uitest_agent_v*.so",
+    "devicetest/res/prototype/native/uitest_agent_v*.so",
+    "*/res/prototype/native/uitest_agent_v*.so",
+    "Contents/Python/lib/python3.*/site-packages/devicetest/res/prototype/native/uitest_agent_v*.so",
+    "*/Contents/Python/lib/python3.*/site-packages/devicetest/res/prototype/native/uitest_agent_v*.so",
+    "*/devicetest/res/prototype/native/uitest_agent_v*.so",
+)
+
+# 用户目录浅层扫描的预算（只找名字含 deveco 的目录，别把家目录当全盘走）
+_HOME_SCAN_MAX_DEPTH = 4
+_HOME_SCAN_MAX_DIRS = 300
+_HOME_SCAN_BUDGET = 0.5
+_HOME_SCAN_LIMIT = 4                       # 最多认几个 DevEco 根，够用就行
+_HOME_SCAN_PRUNE = _SO_PRUNE | {"node_modules", ".venv", "venv", "Temp", ".git",
+                                "site-packages", "dist-info", "__pycache__"}
+
+
+def _normalize_spec(spec: str) -> str:
+    """规整用户/环境变量给的路径：去空白、去成对引号（Windows 复制路径常带引号）、展开 ~。"""
+    s = (spec or "").strip()
+    for _ in range(2):                     # 对付 "…" 或 '…' 甚至 ""…""
+        if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
+            s = s[1:-1].strip()
+    if not s:
+        return ""
+    return os.path.expanduser(os.path.expandvars(s))
+
+
+def search_deveco_root(root: str, deadline: Optional[float] = None) -> List[str]:
+    """在**给定的 DevEco Testing 安装路径**下找 agent.so，返回所有命中文件。
+
+    先按已知相对布局做零遍历 glob；布局不匹配（用户指到了中间某一层）再走有界遍历。
+    `deadline` 可由调用方传入，让多个候选根**共用**一份预算（否则每个根各花一份，
+    候选一多总耗时就成了预算乘以根数）。
+    """
+    root = _normalize_spec(root)
+    if not root or not os.path.isdir(root):
+        return []
+    hits: List[str] = []
+    seen: set = set()
+    for rel in _DEVTEST_SO_RELS:
+        for f in sorted(glob.glob(os.path.join(root, rel))):
+            if not os.path.isfile(f):
+                continue
+            real = os.path.realpath(f)
+            if real not in seen:
+                seen.add(real)
+                hits.append(f)
+    if hits:
+        return hits
+    return _bounded_find_so(
+        (root,), deadline if deadline is not None else time.monotonic() + _SO_SEARCH_BUDGET)
+
+
+def resolve_so_spec(spec: str) -> List[str]:
+    """解析一条显式指定，返回候选 so 文件列表。
+
+    - 指向 .so **文件** → 直接用（不限定文件名，尊重用户指定）；
+    - 指向**目录**（DevEco Testing 安装路径）→ 在其下搜索；
+    - 路径不存在/啥也没找到 → 空列表（调用方据此回退到其它来源，而不是直接失败）。
+    """
+    spec = _normalize_spec(spec)
+    if not spec:
+        return []
+    if os.path.isfile(spec):
+        return [spec]
+    if os.path.isdir(spec):
+        return search_deveco_root(spec)
+    return []
+
+
+def describe_deveco_path(raw: str) -> Tuple[bool, str]:
+    """GUI「设置」用：解析用户输入的路径并给出人话结论 (是否可用, 说明)。"""
+    spec = _normalize_spec(raw)
+    if not spec:
+        return False, "路径为空"
+    if not os.path.exists(spec):
+        return False, f"路径不存在：{spec}"
+    hits = resolve_so_spec(spec)
+    if not hits:
+        return False, "该路径下没找到 uitest_agent_v*.so"
+    vers = sorted({_so_version_of(h) for h in hits}, key=_uitest_tuple, reverse=True)
+    return True, "找到 agent.so v" + "、v".join(vers)
+
+
+def _find_named_dirs(roots: Sequence[str], mark: str,
+                     limit: int = _HOME_SCAN_LIMIT) -> List[str]:
+    """在 roots 下**浅层有界**地找名字含 mark 的目录（深度/目录数/时长三重预算）。
+
+    预算既在层与层之间判、也在单个目录内部判：撞上超大目录（一次 scandir 几万条目）
+    也要能就地喊停，否则预算会被单层吃掉（_bounded_find_so 踩过同样的坑）。
+    """
+    import collections
+    out: List[str] = []
+    deadline = time.monotonic() + _HOME_SCAN_BUDGET
+    visited = 0
+    queue = collections.deque((r, 0) for r in roots if os.path.isdir(r))
+    while queue:
+        if time.monotonic() > deadline or visited >= _HOME_SCAN_MAX_DIRS \
+                or len(out) >= limit:
+            break
+        d, depth = queue.popleft()
+        visited += 1
+        n = 0
+        try:
+            with os.scandir(d) as it:
+                for e in it:
+                    n += 1
+                    if not n % 128 and time.monotonic() > deadline:
+                        break
+                    try:
+                        if e.is_symlink() or not e.is_dir(follow_symlinks=False):
+                            continue
+                    except OSError:
+                        continue
+                    if mark in e.name.lower():
+                        out.append(e.path)
+                        if len(out) >= limit:
+                            break
+                        continue                    # 命中即 DevEco 根，不再往里深挖
+                    if depth >= _HOME_SCAN_MAX_DEPTH or e.name in _HOME_SCAN_PRUNE:
+                        continue
+                    queue.append((e.path, depth + 1))
+        except OSError:
+            continue
+    if out:
+        log.info("用户目录下发现疑似 DevEco 目录：%s", "; ".join(out))
+    return out
+
+
+def _home_deveco_roots() -> List[str]:
+    """用户目录下的 DevEco Testing 候选根。
+
+    本程序可能被安装在任意目录（甚至绿色版），所以自动发现**只看用户目录**，不看自身位置。
+    常见摆放先零遍历命中；没有再浅层扫一遍找名字含 deveco 的目录。
+    """
+    home = Path.home()
+    quick = [
+        home / "DevEco Testing.app", home / "DevEco_Testing_for_App.app",
+        home / "Applications" / "DevEco Testing.app",
+        home / "Applications" / "DevEco_Testing_for_App.app",
+        home / "Applications" / "DevEco Testing",
+        home / "DevEco Testing", home / "deveco-testing",
+    ]
+    for base in (os.environ.get("LOCALAPPDATA", "").strip(),
+                 os.environ.get("APPDATA", "").strip()):
+        if base:
+            quick += [Path(base) / "Huawei", Path(base) / "Programs"]
+    out = [str(p) for p in quick if p.is_dir()]
+    out += _find_named_dirs([str(home)], _DEVTEST_NAME_MARK)
+    seen: set = set()
+    uniq: List[str] = []
+    for p in out:
+        if p not in seen:
+            seen.add(p)
+            uniq.append(p)
+    return uniq
+
+
+def _standard_deveco_roots() -> List[str]:
+    """各平台 DevEco Testing 的常见安装根（存在才算；Windows 走环境变量，可能在任意盘）。"""
+    cands: List[str] = list(_DEVTEST_SO_DIRS)          # macOS 两个 .app 的 native 精确落点
+    cands += [
+        "/Applications/DevEco Testing.app",
+        "/Applications/DevEco_Testing_for_App.app",
+    ]
+    for base in _env_roots():
+        cands += [os.path.join(base, "Huawei"), os.path.join(base, "DevEco Testing")]
+    return [c for c in cands if c and os.path.isdir(c)]
+
+
 
 class AgentError(RuntimeError):
     """agent.so 通道不可用（so 缺失、daemon 起不来、协议握手失败等）。"""
@@ -183,21 +370,6 @@ def agent_so_version(uitest_version: str, arch: str = "") -> str:
     if _uitest_tuple(uitest_version) >= _AGENT_15_MIN_UITEST:
         return "1.1.5"
     return "1.1.3"
-
-
-def _iter_candidate_dirs() -> Iterator[str]:
-    """agent.so 的**已知**落点（快路径：全是绝对路径、零遍历）。
-
-    显式指定 → 程序内置 → DevEco Testing 默认安装目录。内置位置用
-    resources.resource_path 解析，兼容打包态（macOS .app 的 Contents/Frameworks、
-    Windows onedir 的 _MEIPASS）与开发态仓库根。
-    """
-    env = os.environ.get("WSCRCPY_AGENT_SO", "").strip()
-    if env:
-        yield env
-    for rel in (os.path.join("vendor", "so"), os.path.join("vendor", "agent"), "so"):
-        yield str(resources.resource_path(rel))
-    yield from _DEVTEST_SO_DIRS
 
 
 def _collect_so_in_dir(path: str, out: List[str], seen: set) -> None:
@@ -313,49 +485,131 @@ _SO_CACHE: Optional[Tuple[Tuple[str, ...], List[str], float]] = None
 _SO_EMPTY_TTL = 300.0
 
 
-def _find_so_files() -> List[str]:
-    """收集所有可见的 agent.so。WSCRCPY_AGENT_SO 若直接指向文件则优先。
+def _explicit_sources(spec: Optional[str]) -> List[Tuple[str, str]]:
+    """显式指定的 so 来源，按优先级：(来源说明, 原样路径)。
 
-    三级：已知目录（绝对、零遍历）→ 定向模式（绝对、只匹配固定层级）→ 有界遍历。
-    **前一级有结果就不进下一级**，且整体带缓存 —— 扫描/连接每次都会调到这里，
-    绝不能每次都去走目录（那曾是「设备已连接却一直 loading」的根因）。
+    三者**语义相同**：都既可以指向 so 文件本身，也可以指向 DevEco Testing 安装路径
+    （后者在其下搜索 so）。
+    """
+    srcs: List[Tuple[str, str]] = []
+    if spec and spec.strip():
+        srcs.append(("--agent-so", spec))
+    env = os.environ.get("WSCRCPY_AGENT_SO", "").strip()
+    if env:
+        srcs.append(("环境变量 WSCRCPY_AGENT_SO", env))
+    cfg = resources.get_setting(SETTING_DEVECO_PATH).strip()
+    if cfg:
+        srcs.append(("设置里的 DevEco Testing 路径", cfg))
+    return srcs
+
+
+def _collect_from_roots(roots: Sequence[str], label: str,
+                       budget: float = _SO_SEARCH_BUDGET) -> List[str]:
+    """在一批 DevEco 根目录下搜 so，去重后返回；所有根共用一份时间预算。"""
+    out: List[str] = []
+    seen: set = set()
+    deadline = time.monotonic() + budget
+    for root in roots:
+        if time.monotonic() > deadline:
+            log.debug("agent.so 候选根搜索超预算，提前结束（%s）", label)
+            break
+        for f in search_deveco_root(root, deadline):
+            real = os.path.realpath(f)
+            if real not in seen:
+                seen.add(real)
+                out.append(f)
+    if out:
+        log.info("agent.so 来自%s：%s", label,
+                 "; ".join(sorted({os.path.dirname(f) for f in out})[:3]))
+    return out
+
+
+def _bundled_so_files() -> List[str]:
+    """程序内置的 agent.so 落点（打包态 Frameworks/_MEIPASS、开发态仓库）。"""
+    out: List[str] = []
+    seen: set = set()
+    for rel in (os.path.join("vendor", "so"), os.path.join("vendor", "agent"), "so"):
+        _collect_so_in_dir(str(resources.resource_path(rel)), out, seen)
+    return out
+
+
+def _scan_so_files(spec: Optional[str]) -> List[str]:
+    """按优先级逐级找 so，**前一级有结果就不看后面的**。
+
+    1. `--agent-so`（文件或 DevEco 路径）
+    2. `WSCRCPY_AGENT_SO`
+    3. GUI「设置」里配置的 DevEco Testing 路径
+    4. 用户目录下的 DevEco Testing（自动发现，不依赖本程序装在哪儿）
+    5. 程序内置 `vendor/so`
+    6. 各平台标准安装位置
+    7. 定向 glob（绝对路径、单层 `*`）
+    8. 有界兜底遍历（预算内）
+    """
+    # 1~3 显式来源：谁先解析出 so 就用谁；都解析不出来就继续（不让写错的路径把功能卡死）
+    for label, raw in _explicit_sources(spec):
+        hits = resolve_so_spec(raw)
+        if hits:
+            log.info("agent.so 由%s指定：%s → %d 个候选", label, _normalize_spec(raw), len(hits))
+            return hits
+        log.warning("%s 未解析出 agent.so：%r（继续尝试其它来源）", label, raw)
+
+    # 4 用户目录下的 DevEco Testing
+    hits = _collect_from_roots(_home_deveco_roots(), "用户目录下的 DevEco Testing")
+    if hits:
+        return hits
+
+    # 5 程序内置
+    hits = _bundled_so_files()
+    if hits:
+        return hits
+
+    # 6 标准安装位置
+    hits = _collect_from_roots(_standard_deveco_roots(), "DevEco Testing 标准安装位置")
+    if hits:
+        return hits
+
+    # 7 定向 glob（全绝对路径，每级只用一个 `*`，代价可预期）
+    out: List[str] = []
+    seen: set = set()
+    for pat in _fallback_patterns():
+        for hit in sorted(glob.glob(pat)):
+            real = os.path.realpath(hit)
+            if real not in seen and os.path.isfile(hit):
+                seen.add(real)
+                out.append(hit)
+    if out:
+        return out
+
+    # 8 有界遍历（带预算）
+    log.info("已知位置未找到 agent.so，开始有界兜底搜索（预算 %.1fs）", _SO_SEARCH_BUDGET)
+    return _bounded_find_so(_so_roots(), time.monotonic() + _SO_SEARCH_BUDGET)
+
+
+def _find_so_files(spec: Optional[str] = None) -> List[str]:
+    """收集候选 agent.so（带缓存）。
+
+    缓存键包含三条显式来源，所以：改环境变量、改设置、换 --agent-so 都会自动失效重扫——
+    绝不能每次连接都重走目录（那曾是「设备已连接却一直 loading」的根因）。
     """
     global _SO_CACHE
     env = os.environ.get("WSCRCPY_AGENT_SO", "").strip()
-    key = (env,)
+    cfg = resources.get_setting(SETTING_DEVECO_PATH).strip()
+    key = (spec or "", env, cfg)
     now = time.monotonic()
     if _SO_CACHE and _SO_CACHE[0] == key:
         files, t = _SO_CACHE[1], _SO_CACHE[2]
         if files or now - t < _SO_EMPTY_TTL:
             return list(files)
 
-    if env and os.path.isfile(env):
-        files = [env]
-    else:
-        seen, out = set(), []
-        for cand in _iter_candidate_dirs():
-            if not cand:
-                continue
-            if os.path.isfile(cand):
-                real = os.path.realpath(cand)          # 显式指向某个 so 文件
-                if real not in seen:
-                    seen.add(real)
-                    out.append(cand)
-            else:
-                _collect_so_in_dir(cand, out, seen)
-        if not out:                                    # 2 级：定向模式（全绝对路径）
-            for pat in _fallback_patterns():
-                for hit in sorted(glob.glob(pat)):
-                    real = os.path.realpath(hit)
-                    if real not in seen and os.path.isfile(hit):
-                        seen.add(real)
-                        out.append(hit)
-        if not out:                                    # 3 级：有界遍历（带预算）
-            log.info("已知位置未找到 agent.so，开始有界兜底搜索（预算 %.1fs）", _SO_SEARCH_BUDGET)
-            out = _bounded_find_so(_so_roots(), now + _SO_SEARCH_BUDGET)
-        files = out
-    _SO_CACHE = (key, files, now)
+    files = _scan_so_files(spec)
+    _SO_CACHE = (key, list(files), now)
     return list(files)
+
+
+def clear_so_cache() -> None:
+    """丢掉缓存并重扫（GUI 保存设置后调用，让新路径立刻生效）。"""
+    global _SO_CACHE
+    _SO_CACHE = None
 
 
 def _so_version_of(path: str) -> str:
@@ -371,13 +625,8 @@ def _so_version_of(path: str) -> str:
     return m.rstrip(".") or "0"
 
 
-def find_agent_so(uitest_version: str = "", arch: str = "") -> Optional[str]:
-    """找与设备匹配的 agent.so。
-
-    优先级：WSCRCPY_AGENT_SO → 与设备匹配的版本 → x86/arm 匹配的近似版本 → 任意。
-    返回 None 表示本机没有可用的 agent.so（需安装 DevEco Testing 或自备）。
-    """
-    files = _find_so_files()
+def _pick_best(files: Sequence[str], uitest_version: str, arch: str) -> Optional[str]:
+    """在一批候选中挑与设备最匹配的 so：精确版本 → 不高过目标的最佳版本 → 任意。"""
     if not files:
         return None
     # 设备版本没读到（hdc 抽风 / 设备没就绪）：不能用 agent_so_version("") 的返回值 ——
@@ -411,6 +660,18 @@ def find_agent_so(uitest_version: str = "", arch: str = "") -> Optional[str]:
         log.info("未找到 agent.so v%s，回退 v%s", want, _so_version_of(pick))
         return pick
     return sorted(files, key=ver_key, reverse=True)[0]
+
+
+def find_agent_so(uitest_version: str = "", arch: str = "",
+                  spec: Optional[str] = None) -> Optional[str]:
+    """找与设备匹配的 agent.so。
+
+    `spec`（来自 CLI `--agent-so`）优先级最高，且**既可以是 so 文件也可以是 DevEco
+    Testing 安装路径**；不传则按环境变量 → 设置 → 用户目录/标准位置 → 内置 → 兜底 的顺序。
+    再在其中按版本（uitest）与架构挑最匹配的一个。
+    返回 None 表示本机没有可用的 agent.so（需安装 DevEco Testing 或用 --agent-so 指定）。
+    """
+    return _pick_best(_find_so_files(spec), uitest_version, arch)
 
 
 # --------------------------------------------------------------------------- #
@@ -690,7 +951,9 @@ class AgentCapture(BaseCapture):
         p = AgentProbe()
         p.uitest_version = self._device_uitest_version()
         p.arch = self._device_arch()
-        p.so_path = self.so_path or find_agent_so(p.uitest_version, p.arch)
+        # so_path 是「显式指定」，可能是 so 文件也可能是 DevEco Testing 路径，交给
+        # find_agent_so 统一解析（文件直接用；目录在其下搜）
+        p.so_path = find_agent_so(p.uitest_version, p.arch, self.so_path)
         if p.so_path:
             p.so_version = _so_version_of(p.so_path)
         self._probe = p
@@ -814,8 +1077,9 @@ class AgentCapture(BaseCapture):
             probe = self.probe_device()
             if not probe.so_path:
                 raise AgentError(
-                    "未找到 uitest agent.so。请安装 DevEco Testing（自带该 so）"
-                    "或用 --agent-so 指定路径")
+                    "未找到 uitest agent.so。请安装 DevEco Testing（自带该 so），"
+                    "或在界面「⚙ 设置」里填它的安装路径；"
+                    "也可用 --agent-so / 环境变量 WSCRCPY_AGENT_SO 指定 so 文件或 DevEco 目录")
             log.info("agent.so: %s (v%s) uitest=%s arch=%s",
                      probe.so_path, probe.so_version, probe.uitest_version, probe.arch)
             self.on_status(f"agent 模式：启动中（agent.so v{probe.so_version}）")
@@ -948,8 +1212,11 @@ class AgentCapture(BaseCapture):
         self._teardown()
 
 
-def capture_supported(hdc: Hdc, so_path: Optional[str] = None) -> Tuple[bool, str]:
-    """探测 agent 模式是否可用（不启动推流），返回 (可用, 说明)。"""
+def capture_supported(hdc: Hdc, spec: Optional[str] = None) -> Tuple[bool, str]:
+    """探测 agent 模式是否可用（不启动推流），返回 (可用, 说明)。
+
+    `spec` 是「显式指定」：so 文件或 DevEco Testing 安装路径都行（见 find_agent_so）。
+    """
     try:
         version = ""
         try:
@@ -965,9 +1232,12 @@ def capture_supported(hdc: Hdc, so_path: Optional[str] = None) -> Tuple[bool, st
             arch = hdc.shell("param", "get", "const.product.cpu.abilist", timeout=10).strip()
         except HdcError:
             pass
-        so = so_path or find_agent_so(version, arch)
+        # 同上：so_path 可以是文件或 DevEco Testing 目录
+        so = find_agent_so(version, arch, spec)
         if not so:
-            return False, "本机未找到 agent.so（安装 DevEco Testing 或用 --agent-so 指定）"
+            return False, ("本机未找到 agent.so（装 DevEco Testing，"
+                           "或用界面「⚙ 设置」/ --agent-so / WSCRCPY_AGENT_SO 指定"
+                           " so 文件或 DevEco Testing 目录）")
         return True, f"agent.so v{_so_version_of(so)}（uitest {version or '?'} / {arch or '?'}）"
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"
