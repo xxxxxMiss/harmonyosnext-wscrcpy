@@ -946,3 +946,23 @@ sha256 `dcf8a1798759d4ec049c1d8e71db618d9187602e494eb348605e2c807e83fba5`）
 —— 重打包后解包自检 `--selfcheck` 第 7 项在「默认 / 带引号路径 / 配置文件 /
 环境变量」四种情况下都打印出正确 so；`codesign -v --deep --strict` 通过。
 本地 `./build.sh` 仍止步于 DMG 步骤（沙箱禁 `hdiutil create`，非构建问题）。
+
+### 16.6 CI 发布件验证（tag v0.4.1，run 36420809421）
+
+打 tag 后 GitHub Actions 三个 job（macos / windows / release）**全部成功**，Release 已挂上
+两个可下载件，均按本节方法在**本机下载回来逐个验过**：
+
+| 产物 | 大小 | sha256（与 GitHub 记录一致） | 验证内容 |
+|------|------|------------------------------|----------|
+| `Wscrcpy.exe` | 159,575,644 B | `6acbb7a763885e7be2510024e21053c0ba37a1663f71a2d6e431fa741ac4097e` | `PE32+ GUI x86-64`；内含 `bin/hdc.exe`、`bin/ffmpeg.exe`、`bin/libusb_shared.dll`、`data/caploop.sh`、`vendor/so/screencopy_v2_1.{2,3}.so`；**无** `libexternal_hdc.dll` |
+| `Wscrcpy-macOS.dmg` | 94,748,078 B | `2cee9d1ecc6ee041383b1177b24adad1cb7eecaf57819c321e8098d69587ea2c` | `hdiutil verify` 校验和 VALID；挂载后 `codesign -v --deep --strict` 通过，`--selfcheck` 第 4~7 项（hdc/ffmpeg/caploop/agent.so）全部就位 |
+
+两个包都按字节级解出内置 PYZ，确认**新功能确实在发布件里**（不是只在本机源码里）：
+
+- `watchscrcpy.gui`：提示语 `如要开启原生画质，请配置DevEco Testing安装路径。`、`⚙ 设置`、`浏览…`；
+- `watchscrcpy.agent`：`deveco_path`、`用户目录下的 DevEco Testing`、`--agent-so`；
+- `watchscrcpy.resources`：`WSCRCPY_CONFIG_DIR`、`Application Support`。
+
+（Windows 包用 `PyInstaller.archive.readers.CArchiveReader` + `ZlibArchiveReader`，
+`extract(mod, raw=True)` 取解压后的字节码再按字节找字符串——3.12 的字节码在 3.9 上
+不能 `marshal.loads`，所以要 `raw=True`。）
