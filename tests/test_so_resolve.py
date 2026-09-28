@@ -130,11 +130,14 @@ def main():
         check(f"uitest {uv} {note}", got == want, f"得到 {got}")
 
     print("\n=== 8. 显式路径写错时不卡死，仍走其它来源 ===")
+    # 断言"与本机其它来源的结果一致"而不是"一定找到 so"：本机没装 DevEco 时前者照样成立
+    agent.clear_so_cache()
+    baseline = agent.find_agent_so("7.0.0.1", "arm64-v8a")
     t0 = time.monotonic()
     got = pick(f"{root}/definitely-not-exist-xyz")
     el = time.monotonic() - t0
-    check("写错路径 → 回落到其它来源（本机 DevEco 或内置 vendor/so）",
-          bool(got), f"得到 {got}")
+    check("写错路径 → 结果与不指定时一致（回落到其它来源，不报错、不卡住）",
+          got == baseline, f"得到 {got} / 基线 {baseline}")
     check("且耗时可接受（<2s）", el < 2.0, f"{el:.2f}s")
 
     print("\n=== 9. 缓存 ===")
