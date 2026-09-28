@@ -940,3 +940,103 @@ python3 tests/test_gui_settings.py    # 界面设置浮层（29 项断言，QT_Q
   `shell` 全部 `[E001005] Device not found or connected`，重启 hdc server 与换 SDK hdc
   （3.2.0c）后仍不可达（设备侧休眠/链路问题，非程序问题）。改动只涉及「挑哪个 so」与界面，
   设备侧协议路径未动；待设备可连后按 `--probe` 第 7 项 + 日志 `agent.so: … (v1.2.2)` 复验。
+
+**本机重建的可分发件**：（91784519 字节，
+sha256 `8adcaa36e6a91f9556d5542b4b24ef576f366360dd9445f9434345f18322ffe5`）—— 重打包后解包自检  第 7 项在「默认 / 引号路径 /
+配置文件 / 环境变量」四种情况下都打印出正确 so；签名 `codesign -v --deep --strict` 通过。
+本地 == [1/3] 备齐 vendor 资源 ==
+hdc:    Mach-O 64-bit executable arm64
+ffmpeg: Mach-O 64-bit executable arm64
+== [2/3] PyInstaller 构建 ==
+43 INFO: PyInstaller: 6.22.2, contrib hooks: 2026.7
+43 INFO: Python: 3.9.6
+52 INFO: Platform: macOS-26.5.1-arm64-arm-64bit
+52 INFO: Python environment: /Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9
+56 INFO: Module search paths (PYTHONPATH):
+['/Users/chenxianlong/workspace/ai-test/harmonyosnext-scrcpy',
+ '/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python39.zip',
+ '/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9',
+ '/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/lib-dynload',
+ '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages',
+ '/Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/site-packages',
+ '/Users/chenxianlong/workspace/ai-test/harmonyosnext-scrcpy']
+204 INFO: Appending 'binaries' from .spec
+204 INFO: Appending 'datas' from .spec
+204 INFO: checking Analysis
+212 INFO: Building because excludes changed
+212 INFO: Looking for Python shared library...
+216 INFO: Using Python shared library: /Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/Python3
+216 INFO: Running Analysis Analysis-00.toc
+216 INFO: Target bytecode optimization level: 0
+216 INFO: Initializing module dependency graph...
+216 INFO: Initializing module graph hook caches...
+224 INFO: Analyzing modules for base_library.zip ...
+549 INFO: Processing standard module hook 'hook-encodings.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks'
+702 INFO: Processing standard module hook 'hook-math.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks'
+797 INFO: Processing standard module hook 'hook-heapq.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks'
+1111 INFO: Processing standard module hook 'hook-pickle.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks'
+1663 INFO: Caching module dependency graph...
+1688 INFO: Analyzing /Users/chenxianlong/workspace/ai-test/harmonyosnext-scrcpy/wscrcpy.py
+1902 INFO: Processing standard module hook 'hook-PIL.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks'
+1947 INFO: Processing standard module hook 'hook-PIL.Image.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks'
+2078 INFO: Processing standard module hook 'hook-numpy.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks'
+2212 INFO: Processing standard module hook 'hook-platform.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks'
+2226 INFO: Processing standard module hook 'hook-xml.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks'
+2309 INFO: Processing standard module hook 'hook-sysconfig.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks'
+2316 INFO: Processing standard module hook 'hook-_osx_support.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks'
+2382 INFO: Processing standard module hook 'hook-webbrowser.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks'
+2734 INFO: Processing standard module hook 'hook-difflib.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks'
+2833 INFO: Processing standard module hook 'hook-multiprocessing.util.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks'
+2973 INFO: Processing standard module hook 'hook-_ctypes.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks'
+3842 INFO: Processing pre-safe-import-module hook 'hook-typing_extensions.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks/pre_safe_import_module'
+3843 INFO: SetuptoolsInfo: initializing cached setuptools info...
+4117 INFO: Processing standard module hook 'hook-xml.etree.cElementTree.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks'
+4197 INFO: Processing standard module hook 'hook-PIL.ImageFilter.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks'
+4320 INFO: Processing standard module hook 'hook-PySide6.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks'
+4431 INFO: Processing standard module hook 'hook-shiboken6.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks'
+4523 INFO: Processing standard module hook 'hook-PySide6.QtNetwork.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks'
+5083 INFO: Processing standard module hook 'hook-PySide6.QtCore.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks'
+5544 INFO: Processing standard module hook 'hook-PySide6.QtWidgets.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks'
+6176 INFO: Processing standard module hook 'hook-PySide6.QtGui.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks'
+6373 INFO: Processing standard module hook 'hook-Crypto.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/_pyinstaller_hooks_contrib/stdhooks'
+6725 INFO: Processing standard module hook 'hook-grpc.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/_pyinstaller_hooks_contrib/stdhooks'
+6815 INFO: Processing standard module hook 'hook-pkg_resources.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks'
+7252 INFO: Processing standard module hook 'hook-av.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/_pyinstaller_hooks_contrib/stdhooks'
+7572 INFO: Processing pre-safe-import-module hook 'hook-packaging.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks/pre_safe_import_module'
+7588 INFO: Analyzing hidden import 'appdirs'
+7594 INFO: Processing standard module hook 'hook-appdirs.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/_pyinstaller_hooks_contrib/stdhooks'
+7595 INFO: Processing module hooks (post-graph stage)...
+7887 INFO: Processing standard module hook 'hook-PIL.SpiderImagePlugin.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks'
+7960 INFO: Processing standard module hook 'hook-PySide6.QtDBus.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks'
+8059 INFO: Performing binary vs. data reclassification (171 entries)
+8152 INFO: Looking for ctypes DLLs
+8158 INFO: Analyzing run-time hooks ...
+8161 INFO: Including run-time hook 'pyi_rth_inspect.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks/rthooks'
+8163 INFO: Including run-time hook 'pyi_rth_pkgutil.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks/rthooks'
+8164 INFO: Including run-time hook 'pyi_rth_multiprocessing.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks/rthooks'
+8165 INFO: Including run-time hook 'pyi_rth_pkgres.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks/rthooks'
+8167 INFO: Including run-time hook 'pyi_rth_pyside6.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks/rthooks'
+8168 INFO: Processing pre-find-module-path hook 'hook-_pyi_rth_utils.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks/pre_find_module_path'
+8169 INFO: Processing standard module hook 'hook-_pyi_rth_utils.py' from '/Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/hooks'
+8180 INFO: Creating base_library.zip...
+8190 INFO: Looking for dynamic libraries
+8959 INFO: Warnings written to /Users/chenxianlong/workspace/ai-test/harmonyosnext-scrcpy/build/wscrcpy/warn-wscrcpy.txt
+8988 INFO: Graph cross-reference written to /Users/chenxianlong/workspace/ai-test/harmonyosnext-scrcpy/build/wscrcpy/xref-wscrcpy.html
+9311 INFO: checking PYZ
+9316 INFO: EXE target arch: arm64
+9316 INFO: Code signing identity: None
+9318 INFO: checking PKG
+9319 INFO: Bootloader /Users/chenxianlong/Library/Python/3.9/lib/python/site-packages/PyInstaller/bootloader/Darwin-64bit/runw
+9319 INFO: checking EXE
+9321 INFO: checking COLLECT
+9324 INFO: Removing dir /Users/chenxianlong/workspace/ai-test/harmonyosnext-scrcpy/dist/Wscrcpy
+9365 INFO: Building COLLECT COLLECT-00.toc
+10603 INFO: Building COLLECT COLLECT-00.toc completed successfully.
+10611 INFO: checking BUNDLE
+10613 INFO: Removing dir /Users/chenxianlong/workspace/ai-test/harmonyosnext-scrcpy/dist/Wscrcpy.app
+10670 INFO: Building BUNDLE BUNDLE-00.toc
+11900 INFO: Signing the BUNDLE...
+12113 INFO: Building BUNDLE BUNDLE-00.toc completed successfully.
+12120 INFO: Build complete! The results are available in: /Users/chenxianlong/workspace/ai-test/harmonyosnext-scrcpy/dist
+== [3/3] ad-hoc 签名 ==
+== [4/4] DMG 安装包 == 仍止步于 DMG 步骤（沙箱禁 `hdiutil create`，非构建问题）。
