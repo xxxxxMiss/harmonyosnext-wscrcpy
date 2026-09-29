@@ -20,7 +20,7 @@ os.environ.pop("WSCRCPY_AGENT_SO", None)
 
 from PySide6.QtCore import QEvent, Qt                      # noqa: E402
 from PySide6.QtGui import QKeyEvent                        # noqa: E402
-from PySide6.QtWidgets import QApplication, QLineEdit      # noqa: E402
+from PySide6.QtWidgets import QApplication, QFileDialog, QLineEdit, QPushButton      # noqa: E402
 
 FAIL = []
 
@@ -160,6 +160,85 @@ def main():
     check("未连接：不触发重启，仅提示已保存",
           not win._quality_switching and "设置已保存" in win.status.text(),
           win.status.text())
+    ov.close_overlay(); app.processEvents()
+
+    print("\n=== 11. 卡片里的按钮文字不能被切（曾经的 bug：被父布局压扁 10px）===")
+
+    def glyph_margins(w):
+        """渲染该控件，返回文字（亮像素）到四边的留白（设备像素）。"""
+        img = w.grab().toImage()
+        iw, ih = img.width(), img.height()
+
+        def bright(x, y):
+            c = img.pixelColor(x, y)
+            return (c.red() + c.green() + c.blue()) / 3 > 90
+
+        rows = [y for y in range(ih) if any(bright(x, y) for x in range(iw))]
+        cols = [x for x in range(iw) if any(bright(x, y) for y in range(ih))]
+        if not rows or not cols:
+            return None
+        return (min(cols), min(rows), iw - 1 - max(cols), ih - 1 - max(rows))
+
+    win.hdc = None
+    win._quality_switching = False
+    win.btn_settings.click(); app.processEvents()
+    ov = win.settings
+    for name, b in (("浏览目录…", ov.btn_browse), ("浏览文件…", ov.btn_browse_file),
+                    ("取消", ov.btn_cancel), ("保存", ov.btn_save)):
+        hint = b.sizeHint()
+        check(f"{name} 拿到完整高度（不被父布局压扁）",
+              b.height() >= hint.height() and b.width() >= hint.width(),
+              f"实际 {b.width()}x{b.height()} / sizeHint {hint.width()}x{hint.height()}")
+        m = glyph_margins(b)
+        check(f"{name} 文字四周都没贴边（渲染实测）",
+              m is not None and min(m) >= 4, f"留白(设备像素)={m}")
+    for name, w in (("hint", ov.hint),):
+        check(f"{name} 自动换行后高度足够",
+              w.height() >= w.heightForWidth(w.width()),
+              f"{w.height()} vs 需要 {w.heightForWidth(w.width())}")
+    check("卡片完整落在浮层内",
+          ov.card.width() <= ov.width() and ov.card.height() <= ov.height(),
+          f"卡片 {ov.card.width()}x{ov.card.height()} / 浮层 {ov.width()}x{ov.height()}")
+    check("卡片水平居中",
+          abs(ov.card.x() - (ov.width() - ov.card.width()) // 2) <= 2,
+          f"x={ov.card.x()}")
+    ov._set_msg("路径不存在：/tmp/xxx——请确认选的是 DevEco Testing 安装根目录，"
+                "而不是它下面的某个子目录；也可以直接填 uitest_agent_v*.so 文件路径。", bad=True)
+    app.processEvents()
+    check("长错误文案：卡片随之变高且文字不被切",
+          ov.msg.height() >= ov.msg.heightForWidth(ov.msg.width())
+          and ov.card.height() <= ov.height() and ov.btn_save.height() >= ov.btn_save.sizeHint().height(),
+          f"msg {ov.msg.height()} / 需要 {ov.msg.heightForWidth(ov.msg.width())}，"
+          f"卡片 {ov.card.height()}，按钮 {ov.btn_save.height()}")
+    ov._set_msg("", bad=False)
+    ov.close_overlay()
+
+    print("\n=== 12. 浏览按钮：一次点击只弹一个对话框，取消就是取消（曾经的 bug）===")
+    dialogs = []
+    real_dir, real_file = QFileDialog.getExistingDirectory, QFileDialog.getOpenFileName
+    QFileDialog.getExistingDirectory = staticmethod(
+        lambda *a, **k: (dialogs.append("目录"), "")[1])
+    QFileDialog.getOpenFileName = staticmethod(
+        lambda *a, **k: (dialogs.append("文件"), ("", ""))[1])
+    try:
+        win.btn_settings.click(); app.processEvents()
+        ov.input.setText("")
+        ov.btn_browse.click(); app.processEvents()
+        check("点「浏览目录…」只弹 1 个对话框（取消后不再弹第二个）",
+              dialogs == ["目录"], str(dialogs))
+        dialogs.clear()
+        ov.btn_browse_file.click(); app.processEvents()
+        check("点「浏览文件…」只弹 1 个文件对话框", dialogs == ["文件"], str(dialogs))
+        dialogs.clear()
+        # 选中路径要回填输入框
+        QFileDialog.getExistingDirectory = staticmethod(
+            lambda *a, **k: (dialogs.append("目录"), "/tmp/sores-ish")[1])
+        ov.btn_browse.click(); app.processEvents()
+        check("选中目录后回填输入框", ov.input.text() == "/tmp/sores-ish", ov.input.text())
+        check("回填时也只弹了 1 个对话框", dialogs == ["目录"], str(dialogs))
+    finally:
+        QFileDialog.getExistingDirectory, QFileDialog.getOpenFileName = real_dir, real_file
+    ov.close_overlay()
 
     shutil.rmtree(root, ignore_errors=True)
     print("\n结果:", "全部通过" if not FAIL else f"失败 {len(FAIL)} 项: {FAIL}")

@@ -228,10 +228,13 @@ class SettingsOverlay(QFrame):
         self._on_save = on_save                 # 回调 (输入文本) -> (是否接受, 提示文案)
         self.hide()
 
+        # 卡片**不进布局**、手动居中：放进带 stretch 的布局里会被压缩（实测卡片拿到
+        # 218px 而内容需要 250px，按钮被压到 31px、上下文字被切掉）。手动定位后由
+        # _layout_card() 按内容给足高度。
         card = QFrame(self)
         card.setObjectName("card")
-        card.setFixedWidth(560)
         self.card = card
+        self.card_width = 560                   # 实际宽度在 _layout_card() 里按窗口裁剪
         lay = QVBoxLayout(card)
         lay.setContentsMargins(26, 22, 26, 20)
         lay.setSpacing(10)
@@ -247,7 +250,8 @@ class SettingsOverlay(QFrame):
         self.input.setPlaceholderText("例如 /Applications/DevEco Testing.app"
                                       " 或 C:\\Program Files\\Huawei\\DevEco Testing")
         self.input.returnPressed.connect(self._save)
-        note = QLabel("填 DevEco Testing 安装目录，或直接填 uitest_agent_v*.so 文件；"
+        note = QLabel("填 DevEco Testing 安装目录，或直接填 uitest_agent_v*.so 文件"
+                      "（可用下面的「浏览目录…」「浏览文件…」挑）；"
                       "留空＝按默认顺序自动查找。保存后立即生效。", card)
         note.setObjectName("cardNote")
         note.setWordWrap(True)
@@ -258,10 +262,18 @@ class SettingsOverlay(QFrame):
 
         row = QHBoxLayout()
         row.setSpacing(10)
-        self.btn_browse = QPushButton("浏览…", card)
+        # 两个**各自独立**的浏览按钮：点目录就只弹目录框，点文件就只弹文件框，
+        # 取消＝取消（曾经一个按钮里"目录框取消后再弹文件框"，用户会以为弹了两次）
+        self.btn_browse = QPushButton("浏览目录…", card)
         self.btn_browse.setProperty("neon", True)
         self.btn_browse.setCursor(Qt.PointingHandCursor)
-        self.btn_browse.clicked.connect(self._browse)
+        self.btn_browse.setToolTip("选择 DevEco Testing 的安装目录（推荐）")
+        self.btn_browse.clicked.connect(self._browse_dir)
+        self.btn_browse_file = QPushButton("浏览文件…", card)
+        self.btn_browse_file.setProperty("neon", True)
+        self.btn_browse_file.setCursor(Qt.PointingHandCursor)
+        self.btn_browse_file.setToolTip("直接选择 uitest_agent_v*.so 文件")
+        self.btn_browse_file.clicked.connect(self._browse_file)
         self.btn_cancel = QPushButton("取消", card)
         self.btn_cancel.setProperty("neon", True)
         self.btn_cancel.setCursor(Qt.PointingHandCursor)
@@ -271,6 +283,7 @@ class SettingsOverlay(QFrame):
         self.btn_save.setCursor(Qt.PointingHandCursor)
         self.btn_save.clicked.connect(self._save)
         row.addWidget(self.btn_browse)
+        row.addWidget(self.btn_browse_file)
         row.addStretch(1)
         row.addWidget(self.btn_cancel)
         row.addWidget(self.btn_save)
@@ -283,19 +296,16 @@ class SettingsOverlay(QFrame):
         lay.addSpacing(4)
         lay.addLayout(row)
 
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.addStretch(1)
-        outer.addWidget(card, 0, Qt.AlignHCenter)
-        outer.addStretch(1)
+        # 不设布局：卡片几何完全由 _layout_card() 决定（居中、按内容自适应高度）
 
     # ---- 生命周期 ----
     def open_overlay(self, current: str):
+        self.setGeometry(self.parentWidget().rect())
         self.input.setText(current or "")
         self._set_msg("", bad=False)
-        self.setGeometry(self.parentWidget().rect())
         self.show()
         self.raise_()
+        self._layout_card()          # show 之后再排一次：此时字体度量/样式才最终确定
         self.input.setFocus()
         self.input.selectAll()
 
@@ -306,8 +316,23 @@ class SettingsOverlay(QFrame):
         self.closed.emit()
 
     def sync_geometry(self):
+        """父窗口 resize 时跟随：遮罩铺满，卡片重新按内容测高并居中。"""
         if self.isVisible():
             self.setGeometry(self.parentWidget().rect())
+            self._layout_card()
+
+    def _layout_card(self):
+        """按内容给卡片定尺寸并居中。
+
+        高度必须用 `adjustSize()` 从内容算出来，**不能让父布局去分配**：
+        父布局会把卡片压到比内容更矮，按钮随之被压掉上下 padding、文字被切。
+        宽度给固定值（窗口太窄时收窄），避免长提示语换行太多行。
+        """
+        avail = max(320, self.width() - 40)
+        self.card.setFixedWidth(min(self.card_width, avail))
+        self.card.adjustSize()                      # 高度=内容自然高度（含按钮 padding）
+        self.card.move(max(0, (self.width() - self.card.width()) // 2),
+                       max(0, (self.height() - self.card.height()) // 2))
 
     def _set_msg(self, text: str, bad: bool):
         self.msg.setText(text)
@@ -315,16 +340,31 @@ class SettingsOverlay(QFrame):
         self.msg.style().unpolish(self.msg)
         self.msg.style().polish(self.msg)
         self.msg.setVisible(bool(text))
+        self._layout_card()                         # 文案变长/变短，卡片高度跟着走
 
-    def _browse(self):
-        """挑目录优先（DevEco 安装路径就是目录）；也允许直接挑 so 文件。"""
-        start = self.input.text().strip() or str(Path.home())
-        d = QFileDialog.getExistingDirectory(self, "选择 DevEco Testing 安装目录", start)
+    def _start_dir(self) -> str:
+        """对话框起始目录：输入框里已有的路径能用就用，否则用户主目录。"""
+        cur = self.input.text().strip().strip('"').strip("'")
+        if cur:
+            if os.path.isdir(cur):
+                return cur
+            parent = os.path.dirname(cur)
+            if parent and os.path.isdir(parent):
+                return parent
+        return str(Path.home())
+
+    def _browse_dir(self):
+        """只弹**一个**目录选择框；取消就是取消，不会再弹第二个。"""
+        d = QFileDialog.getExistingDirectory(self, "选择 DevEco Testing 安装目录",
+                                            self._start_dir())
         if d:
             self.input.setText(d)
-            return
-        f, _ = QFileDialog.getOpenFileName(self, "或直接选择 agent.so", start,
-                                           "agent.so (uitest_agent_v*.so);;所有文件 (*)")
+
+    def _browse_file(self):
+        """只弹**一个**文件选择框。"""
+        f, _ = QFileDialog.getOpenFileName(self, "选择 uitest_agent_v*.so",
+                                          self._start_dir(),
+                                          "agent.so (uitest_agent_v*.so);;所有文件 (*)")
         if f:
             self.input.setText(f)
 
