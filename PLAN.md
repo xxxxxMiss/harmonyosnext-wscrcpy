@@ -1032,3 +1032,21 @@ sha256 `a042a37a2c10bcd9ff273843b79beed8a0900e45058ae04b97274525aafeb96a`，已�
 `tests/test_gui_settings.py` 增加第 11、12 节共 16 条断言（按钮不被压扁、文字渲染不贴边、
 卡片在浮层内且居中、长文案卡片自适应、每个浏览按钮只弹一个框、选中回填），
 合计 **45 条**；解析测试仍是 24 条。
+
+### 17.4 v0.4.2 发布件验证（tag v0.4.2，run 36510387060）
+
+三个 job（windows / macos / release）全部 `completed/success`，两个产物都下载回来逐个验过，
+**哈希与 GitHub 记录一致**，且用 `PyInstaller.archive.readers` 解出包内 PYZ 确认两个修复
+真的在发布件里（不是只在本机源码里）：
+
+| 产物 | 大小 | sha256 | 关键检查 |
+|------|------|--------|----------|
+| `Wscrcpy.exe` | 159,583,034 B | `9b901252af9a678371be10f40e8cf94b7ff4367429744852e44dfd70a2fb1254` | `PE32+ GUI x86-64`；`bin/hdc.exe`/`bin/ffmpeg.exe`/`bin/libusb_shared.dll`/`data/caploop.sh`/`vendor/so/screencopy_v2_1.{2,3}.so` 全在，无 `libexternal_hdc` |
+| `Wscrcpy-macOS.dmg` | 94,749,009 B | `aa1418cda85d8241276d8776307fcee2ff70e572be93f7943f625b20c2287bc0` | `hdiutil verify` VALID；挂载后签名校验通过；`--selfcheck` 第 4~7 项就位；Frameworks 下 hdc/ffmpeg/caploop.sh/vendor so 齐 |
+
+两个包内的 `watchscrcpy.gui` 字节码里：`_layout_card`、`_browse_dir`、`_browse_file`、
+`浏览目录…`、`浏览文件…` **都在**，而旧文案 `浏览…`（两段式浏览按钮）**已消失** ——
+说明 §17 的两个修复确实随发布件出厂。
+
+验证脚本：`/tmp/verify_bundle.py <exe 或 .app 主可执行文件> [--expect-fixed]`
+（Windows exe 走归档 TOC 核对资源，macOS .app 走 `Contents/Frameworks` 磁盘核对）。
